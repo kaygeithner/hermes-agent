@@ -227,10 +227,9 @@ For `apply_patch` (file edit) approvals, Hermes shows a summary of what changed 
 
 ## Permission profiles
 
-Codex has three built-in permission profiles:
+Codex has these built-in permission profiles:
 - `:read-only` — no writes; every shell command requires approval
 - `:workspace` — writes within the current workspace allowed without prompts (Hermes' default when you enable the runtime)
-- `:danger-no-sandbox` — no sandbox at all (don't use this unless you understand it)
 
 You can override the default in `~/.codex/config.toml` outside Hermes' managed block:
 

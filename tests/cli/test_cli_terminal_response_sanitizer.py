@@ -52,6 +52,22 @@ class TestStripLeakedTerminalResponses:
         text = "\x1b[31mred\x1b[0m"
         assert _strip_leaked_terminal_responses(text) == text
 
+    def test_strips_osc11_response_esc_form(self):
+        text = "\x1b]11;rgb:1919/1a1a/1b1b\x1b\\"
+        assert _strip_leaked_terminal_responses(text) == ""
+
+    def test_strips_osc11_response_visible_form(self):
+        text = "before^[]11;rgb:1919/1a1a/1b1b^[\\after"
+        assert _strip_leaked_terminal_responses(text) == "beforeafter"
+
+    def test_strips_osc11_response_bare_form(self):
+        text = "]11;rgb:1919/1a1a/1b1b"
+        assert _strip_leaked_terminal_responses(text) == ""
+
+    def test_strips_osc10_and_osc12_color_responses(self):
+        text = "fg\x1b]10;rgb:ffff/ffff/ffff\x1b\\cursor]12;rgb:0000/0000/0000"
+        assert _strip_leaked_terminal_responses(text) == "fgcursor"
+
     def test_preserves_multiline_content(self):
         text = "line 1\n\x1b[53;1Rline 2"
         assert _strip_leaked_terminal_responses(text) == "line 1\nline 2"

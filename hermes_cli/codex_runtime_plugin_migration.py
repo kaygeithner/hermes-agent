@@ -44,6 +44,20 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+_CODEX_BUILTIN_PERMISSION_PROFILES = {
+    "workspace": ":workspace",
+    "read-only": ":read-only",
+}
+_OBSOLETE_CODEX_PERMISSION_PROFILES = {
+    ":danger-no-sandbox",
+    "danger-no-sandbox",
+    ":full-access",
+    "full-access",
+    ":workspace-write",
+    "workspace-write",
+}
+_SAFE_DEFAULT_PERMISSION_PROFILE = ":workspace"
+
 
 # Marker comments wrapping the managed section so re-runs can detect
 # what's ours and what's user-edited. Both must appear or strip is a no-op.
@@ -243,12 +257,50 @@ def _quote_key(key: str) -> str:
     escaped = key.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
 
+
+def _normalize_default_permission_profile(
+    profile: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Return a Codex-compatible default_permissions value plus warning."""
+    if not profile:
+        return None, None
+
+    raw = str(profile).strip()
+    if not raw:
+        return None, None
+
+    if raw in _OBSOLETE_CODEX_PERMISSION_PROFILES:
+        return (
+            _SAFE_DEFAULT_PERMISSION_PROFILE,
+            (
+                f"{raw!r} is not accepted by current Codex builds; "
+                f"using {_SAFE_DEFAULT_PERMISSION_PROFILE!r} instead."
+            ),
+        )
+
+    name = raw[1:] if raw.startswith(":") else raw
+    if name in _CODEX_BUILTIN_PERMISSION_PROFILES:
+        return _CODEX_BUILTIN_PERMISSION_PROFILES[name], None
+
+    if raw.startswith(":"):
+        return (
+            _SAFE_DEFAULT_PERMISSION_PROFILE,
+            (
+                f"unknown Codex built-in permission profile {raw!r}; "
+                f"using {_SAFE_DEFAULT_PERMISSION_PROFILE!r} instead."
+            ),
+        )
+
+    # No leading colon means a user-defined [permissions.<name>] profile.
+    return raw, None
+
+
 def render_codex_toml_section(
     servers: dict[str, dict],
     plugins: Optional[list[dict]] = None,
     default_permission_profile: Optional[str] = None,
 ) -> str:
-    """Render the managed [mcp_servers.<n>] / [plugins.<id>] / [permissions]
+    """Render the managed [mcp_servers.<n>] / [plugins.<id>] / permissions
     block for ~/.codex/config.toml.
 
     Args:
@@ -256,30 +308,30 @@ def render_codex_toml_section(
         plugins: optional list of {name, marketplace, enabled} for native
             Codex plugins to enable. (E.g. the Linear / Atlassian / Asana
             curated plugins, or per-account ChatGPT apps.)
-        default_permission_profile: when set, write `[permissions] default`
-            so the user doesn't get an approval prompt on every write
-            attempt. Common values: "workspace-write", "read-only",
-            "full-access".
+        default_permission_profile: when set, write top-level
+            `default_permissions` so the user doesn't get an approval
+            prompt on every workspace write attempt. Common built-in values:
+            ":workspace" and ":read-only". User-defined profile names are
+            also accepted without a leading colon.
     """
+    normalized_permission_profile, _ = _normalize_default_permission_profile(
+        default_permission_profile
+    )
     out = [MIGRATION_MARKER]
-    if not servers and not plugins and not default_permission_profile:
+    if not servers and not plugins and not normalized_permission_profile:
         out.append("# (no MCP servers, plugins, or permissions configured by Hermes)")
         out.append(MIGRATION_END_MARKER)
         return "\n".join(out) + "\n"
 
-    if default_permission_profile:
-        # Codex's config schema: `default_permissions` is a top-level
-        # string referencing a profile name. Built-in profile names start
-        # with ":" (":workspace-write", ":read-only", ":full-access"). The
-        # [permissions] table is for *user-defined* named profiles with
-        # structured fields — not what we want.
-        normalized = (
-            default_permission_profile
-            if default_permission_profile.startswith(":")
-            else f":{default_permission_profile}"
-        )
+    if normalized_permission_profile:
+        # Codex's config schema: `default_permissions` is a top-level string.
+        # Built-in profile names start with ":"; user-defined profile names
+        # do not. The [permissions] table is for defining those custom
+        # profiles, not for selecting the default.
         out.append("")
-        out.append(f"default_permissions = {_format_toml_value(normalized)}")
+        out.append(
+            f"default_permissions = {_format_toml_value(normalized_permission_profile)}"
+        )
 
     if servers:
         for name in sorted(servers.keys()):
@@ -629,12 +681,11 @@ def migrate(
         default_permission_profile: when set (default ":workspace"), write
             top-level `default_permissions = "<name>"` so users on this
             runtime don't get an approval prompt on every write attempt.
-            Built-in codex profile names are ":workspace", ":read-only",
-            ":danger-no-sandbox" (note the leading ":"). Also accepts a
-            user-defined profile name (no leading ":") that the user has
-            configured in their own [permissions.<name>] table. Set None
-            to leave permissions unset and let codex use its compiled-in
-            default (which is read-only).
+            Built-in codex profile names are ":workspace" and ":read-only"
+            (note the leading ":"). Also accepts a user-defined profile name
+            (no leading ":") that the user has configured in their own
+            [permissions.<name>] table. Set None to leave permissions unset
+            and let codex use its compiled-in default.
         expose_hermes_tools: when True (default), register Hermes' own
             tool surface (web_search, browser_*, delegate_task, vision,
             memory, skills, etc.) as an MCP server in ~/.codex/config.toml
@@ -682,10 +733,16 @@ def migrate(
         for p in plugins:
             report.migrated_plugins.append(f"{p['name']}@{p['marketplace']}")
 
+    normalized_permission_profile, permissions_warning = (
+        _normalize_default_permission_profile(default_permission_profile)
+    )
+    if permissions_warning:
+        report.errors.append(permissions_warning)
+
     # Track whether we wrote a default permission profile so the report
     # surfaces it to the user.
-    if default_permission_profile:
-        report.wrote_permissions_default = default_permission_profile
+    if normalized_permission_profile:
+        report.wrote_permissions_default = normalized_permission_profile
 
     # Inject Hermes' own tool surface as an MCP server so the spawned
     # codex subprocess can call back into Hermes for the tools codex
@@ -701,7 +758,7 @@ def migrate(
     # Build the new managed block
     managed_block = render_codex_toml_section(
         translated, plugins=plugins,
-        default_permission_profile=default_permission_profile,
+        default_permission_profile=normalized_permission_profile,
     )
 
     # Read existing codex config if any, strip the prior managed block,

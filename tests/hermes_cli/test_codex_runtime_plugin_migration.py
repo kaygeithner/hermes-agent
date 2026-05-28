@@ -333,6 +333,26 @@ class TestMigrate:
         assert 'default_permissions = ":workspace"' in text
         assert report.wrote_permissions_default == ":workspace"
 
+    @pytest.mark.parametrize(
+        "profile",
+        [":danger-no-sandbox", "danger-no-sandbox", "full-access", "workspace-write"],
+    )
+    def test_obsolete_permission_profiles_fall_back_to_workspace(self, tmp_path, profile):
+        """Current Codex builds reject obsolete built-in profile names,
+        which prevents app-server startup entirely."""
+        report = migrate(
+            {},
+            codex_home=tmp_path,
+            discover_plugins=False,
+            default_permission_profile=profile,
+            expose_hermes_tools=False,
+        )
+        text = (tmp_path / "config.toml").read_text()
+        assert 'default_permissions = ":workspace"' in text
+        assert profile not in text
+        assert report.wrote_permissions_default == ":workspace"
+        assert any(profile in err for err in report.errors)
+
     def test_explicit_none_permissions_skips_block(self, tmp_path):
         report = migrate({"mcp_servers": {"x": {"command": "y"}}},
                          codex_home=tmp_path,

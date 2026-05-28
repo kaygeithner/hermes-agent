@@ -1496,7 +1496,9 @@ def _hex_to_ansi(hex_color: str, *, bold: bool = False) -> str:
 #   2. HERMES_TUI_THEME=light|dark — explicit theme
 #   3. HERMES_TUI_BACKGROUND=#RRGGBB — explicit bg hint
 #   4. COLORFGBG env (set by xterm/Konsole/urxvt) — bg slot 7/15 = light
-#   5. OSC 11 query (\x1b]11;?\x1b\\) — ask the terminal directly
+#   5. Optional OSC 11 query (\x1b]11;?\x1b\\) only when explicitly enabled
+#      with HERMES_ENABLE_OSC11_QUERY=1. The automatic query is disabled by
+#      default because some terminals/multiplexers echo the response into stdin.
 #   6. Default: assume dark (matches the legacy Hermes assumption)
 #
 # Cached after first call so we don't query the terminal repeatedly.
@@ -1526,7 +1528,14 @@ def _query_osc11_background() -> str | None:
     Most modern terminals reply with \x1b]11;rgb:RRRR/GGGG/BBBB\x1b\\
     within a few ms.  We wait up to 100ms total before giving up.
     Returns "#RRGGBB" or None on timeout / non-tty.
+
+    This probe is intentionally opt-in. In some terminals/multiplexers the
+    OSC 11 response races past startup and is rendered as literal text at the
+    top of the screen or injected into the first prompt. That corruption is
+    worse than defaulting to the dark theme.
     """
+    if not is_truthy_value(os.environ.get("HERMES_ENABLE_OSC11_QUERY")):
+        return None
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         return None
     try:
@@ -1627,7 +1636,7 @@ def _detect_light_mode() -> bool:
                 if 0 <= bg < 16:
                     _LIGHT_MODE_CACHE = result
                     return result
-        # 5. OSC 11 query (best-effort, only when stdin/stdout are TTY)
+        # 5. Optional OSC 11 query (best-effort, explicitly enabled only).
         bg_color = _query_osc11_background()
         if bg_color:
             lum = _luminance_from_hex(bg_color)
@@ -1717,8 +1726,9 @@ _install_skin_light_mode_hook()
 
 
 # Prime the light-mode detection cache early (at module load) when
-# we're running interactively so OSC 11 happens before pt grabs the
-# tty.  Skip for non-tty contexts (subagents, gateway, tests).
+# we're running interactively. OSC 11 is opt-in, so the normal startup path
+# no longer emits terminal queries that can leak into stdin. Skip for non-tty
+# contexts (subagents, gateway, tests).
 try:
     if sys.stdin.isatty() and sys.stdout.isatty():
         _detect_light_mode()
@@ -2450,6 +2460,9 @@ def _apply_bracketed_paste_timeout_patch() -> None:
 # that appears when the ESC byte was stripped by a prior filter.
 _DSR_CPR_ESC_RE = re.compile(r"\x1b\[\d+;\d+R")
 _DSR_CPR_VISIBLE_RE = re.compile(r"\^\[\[\d+;\d+R")
+_OSC_COLOR_ESC_RE = re.compile(r"\x1b\](?:10|11|12);[^\x07\x1b]*(?:\x07|\x1b\\)")
+_OSC_COLOR_VISIBLE_RE = re.compile(r"\^\[\](?:10|11|12);.*?\^\[\\")
+_OSC_COLOR_BARE_RE = re.compile(r"\](?:10|11|12);rgb:[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4}(?:\x07|\x1b\\|\^\[\\)?")
 _SGR_MOUSE_ESC_RE = re.compile(r"\x1b\[<\d+;\d+;\d+[Mm]")
 _SGR_MOUSE_VISIBLE_RE = re.compile(r"\^\[\[<\d+;\d+;\d+[Mm]")
 # Some terminals/filters can drop ESC and literal "^[[", leaving only
@@ -2534,7 +2547,9 @@ def _strip_leaked_terminal_responses_with_meta(text: str) -> tuple[str, bool]:
     """Strip leaked terminal control-response sequences from user input.
 
     Covers Cursor Position Report (CPR / DSR) responses — ``ESC[<row>;<col>R``
-    and the visible ``^[[<row>;<col>R`` form. These are replies the terminal
+    and the visible ``^[[<row>;<col>R`` form. Also covers leaked OSC color
+    responses such as ``ESC]11;rgb:...ESC\\``, visible ``^[]11;...^[\\``,
+    and bare ``]11;rgb:...`` fragments. These are replies the terminal
     sends back to queries prompt_toolkit makes during ``_on_resize`` /
     ``_request_absolute_cursor_position``. When the input parser drops one
     (resize storms, multiplexer focus changes, slow PTYs) the response
@@ -2548,23 +2563,29 @@ def _strip_leaked_terminal_responses_with_meta(text: str) -> tuple[str, bool]:
     if not text:
         return text, False
 
-    has_esc = "\x1b[" in text
+    has_esc = "\x1b[" in text or "\x1b]" in text
     has_visible = "^[" in text
+    has_bare_osc_color = any(marker in text for marker in ("]10;rgb:", "]11;rgb:", "]12;rgb:"))
     has_bare_mouse = "<" in text and ";" in text and ("M" in text or "m" in text)
-    if not (has_esc or has_visible or has_bare_mouse):
+    if not (has_esc or has_visible or has_bare_osc_color or has_bare_mouse):
         return text, False
 
     had_mouse_reports = False
 
     if has_esc:
         text = _DSR_CPR_ESC_RE.sub("", text)
+        text = _OSC_COLOR_ESC_RE.sub("", text)
         text, count = _SGR_MOUSE_ESC_RE.subn("", text)
         had_mouse_reports = had_mouse_reports or count > 0
 
     if has_visible:
         text = _DSR_CPR_VISIBLE_RE.sub("", text)
+        text = _OSC_COLOR_VISIBLE_RE.sub("", text)
         text, count = _SGR_MOUSE_VISIBLE_RE.subn("", text)
         had_mouse_reports = had_mouse_reports or count > 0
+
+    if has_bare_osc_color:
+        text = _OSC_COLOR_BARE_RE.sub("", text)
 
     if has_bare_mouse:
         text, count = _SGR_MOUSE_BARE_RE.subn("", text)

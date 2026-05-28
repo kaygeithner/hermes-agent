@@ -68,6 +68,16 @@ class TestLightModeDetection:
         monkeypatch.setenv("COLORFGBG", "0;15")  # bg slot 15 = light
         assert cli_mod._detect_light_mode() is True
 
+    def test_osc11_query_is_opt_in(self, cli_mod, monkeypatch):
+        monkeypatch.delenv("HERMES_ENABLE_OSC11_QUERY", raising=False)
+
+        class ExplodingStdin:
+            def isatty(self):
+                raise AssertionError("OSC 11 query should not inspect stdin unless opt-in is set")
+
+        monkeypatch.setattr(cli_mod.sys, "stdin", ExplodingStdin())
+        assert cli_mod._query_osc11_background() is None
+
     def test_cache_is_sticky(self, cli_mod, monkeypatch):
         monkeypatch.setenv("HERMES_LIGHT", "1")
         assert cli_mod._detect_light_mode() is True
