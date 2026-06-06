@@ -1548,13 +1548,13 @@ class TestSummaryTargetRatio:
         """Tail token budget should be threshold_tokens * summary_target_ratio."""
         with patch("agent.context_compressor.get_model_context_length", return_value=200_000):
             c = ContextCompressor(model="test", quiet_mode=True, summary_target_ratio=0.40)
-        # 200K * 0.50 threshold * 0.40 ratio = 40K
-        assert c.tail_token_budget == 40_000
+        # 200K * 0.75 threshold * 0.40 ratio = 60K
+        assert c.tail_token_budget == 60_000
 
         with patch("agent.context_compressor.get_model_context_length", return_value=1_000_000):
             c = ContextCompressor(model="test", quiet_mode=True, summary_target_ratio=0.40)
-        # 1M * 0.50 threshold * 0.40 ratio = 200K
-        assert c.tail_token_budget == 200_000
+        # 1M * 0.75 threshold * 0.40 ratio = 300K
+        assert c.tail_token_budget == 300_000
 
     def test_summary_cap_scales_with_context(self):
         """Max summary tokens should be 5% of context, capped at 12K."""
@@ -1576,20 +1576,20 @@ class TestSummaryTargetRatio:
             c = ContextCompressor(model="test", quiet_mode=True, summary_target_ratio=0.95)
         assert c.summary_target_ratio == 0.80
 
-    def test_default_threshold_is_50_percent(self):
-        """Default compression threshold should be 50%, with a 64K floor."""
+    def test_default_threshold_is_75_percent(self):
+        """Default compression threshold should be 75%, with a 64K floor."""
         with patch("agent.context_compressor.get_model_context_length", return_value=100_000):
             c = ContextCompressor(model="test", quiet_mode=True)
-        assert c.threshold_percent == 0.50
-        # 50% of 100K = 50K, but the floor is 64K
-        assert c.threshold_tokens == 64_000
+        assert c.threshold_percent == 0.75
+        # 75% of 100K = 75K, above the 64K floor
+        assert c.threshold_tokens == 75_000
 
     def test_threshold_floor_does_not_apply_above_128k(self):
-        """On large-context models the 50% percentage is used directly."""
+        """On large-context models the 75% percentage is used directly."""
         with patch("agent.context_compressor.get_model_context_length", return_value=200_000):
             c = ContextCompressor(model="test", quiet_mode=True)
-        # 50% of 200K = 100K, which is above the 64K floor
-        assert c.threshold_tokens == 100_000
+        # 75% of 200K = 150K, which is above the 64K floor
+        assert c.threshold_tokens == 150_000
 
     def test_default_protect_last_n_is_20(self):
         """Default protect_last_n should be 20."""

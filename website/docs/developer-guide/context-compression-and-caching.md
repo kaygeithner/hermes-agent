@@ -46,7 +46,7 @@ Hermes has two separate compression layers that operate independently:
                                    │
                                    ▼
                      ┌──────────────────────────┐
-                     │   Agent ContextCompressor │  Fires at 50% of context (default)
+                     │   Agent ContextCompressor │  Fires at 75% of context (default)
                      │   (in-loop, real tokens)  │  Normal context management
                      └──────────────────────────┘
 ```
@@ -81,7 +81,7 @@ All compression settings are read from `config.yaml` under the `compression` key
 ```yaml
 compression:
   enabled: true              # Enable/disable compression (default: true)
-  threshold: 0.50            # Fraction of context window (default: 0.50 = 50%)
+  threshold: 0.75            # Fraction of context window (default: 0.75 = 75%)
   target_ratio: 0.20         # How much of threshold to keep as tail (default: 0.20)
   protect_last_n: 20         # Minimum protected tail messages (default: 20)
 
@@ -97,7 +97,7 @@ auxiliary:
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
-| `threshold` | `0.50` | 0.0-1.0 | Compression triggers when prompt tokens ≥ `threshold × context_length` |
+| `threshold` | `0.75` | 0.0-1.0 | Compression triggers when prompt tokens ≥ `threshold × context_length` |
 | `target_ratio` | `0.20` | 0.10-0.80 | Controls tail protection token budget: `threshold_tokens × target_ratio` |
 | `protect_last_n` | `20` | ≥1 | Minimum number of recent messages always preserved |
 | `protect_first_n` | `3` | (hardcoded) | System prompt + first exchange always preserved |
@@ -106,20 +106,18 @@ auxiliary:
 
 ```
 context_length       = 200,000
-threshold_tokens     = 200,000 × 0.50 = 100,000
-tail_token_budget    = 100,000 × 0.20 = 20,000
+threshold_tokens     = 200,000 × 0.75 = 150,000
+tail_token_budget    = 150,000 × 0.20 = 30,000
 max_summary_tokens   = min(200,000 × 0.05, 12,000) = 10,000
 ```
 
 :::note Threshold is derived from the MAIN model's context window
 `threshold_tokens` is always `threshold × context_length`, where `context_length`
 is the **main agent model's** context window — never the auxiliary/summary
-model's. On a 262,144-token model at the default `0.50`, the threshold is
-`262,144 × 0.50 = 131,072`. That number being close to a common "128K context"
-is a coincidence of the percentage, not a sign that the auxiliary model's window
-is the trigger. The auxiliary model's context window is a separate concern — see
-the "Summary model context length" warning below for how it affects whether a
-summary can be produced, not when compression fires.
+model's. On a 262,144-token model at the default `0.75`, the threshold is
+`262,144 × 0.75 = 196,608`. The auxiliary model's context window is a
+separate concern — see the "Summary model context length" warning below for how
+it affects whether a summary can be produced, not when compression fires.
 :::
 
 
@@ -356,4 +354,4 @@ The CLI shows caching status at startup:
 
 ## Context Pressure Warnings
 
-Intermediate context-pressure warnings have been removed (see the iteration-budget block in `run_agent.py`, which notes: "No intermediate pressure warnings — they caused models to 'give up' prematurely on complex tasks"). Compression fires when prompt tokens reach the configured `compression.threshold` (default 50%) with no prior warning step; gateway session hygiene fires as the secondary safety net at 85% of the model's context window.
+Intermediate context-pressure warnings have been removed (see the iteration-budget block in `run_agent.py`, which notes: "No intermediate pressure warnings — they caused models to 'give up' prematurely on complex tasks"). Compression fires when prompt tokens reach the configured `compression.threshold` (default 75%) with no prior warning step; gateway session hygiene fires as the secondary safety net at 85% of the model's context window.

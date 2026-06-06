@@ -4068,7 +4068,7 @@ def run_conversation(
                 # actual context size the provider reported plus the
                 # assistant turn — a tight lower bound for the next prompt.
                 # Tool results appended above aren't counted yet, but the
-                # threshold (default 50%) leaves ample headroom; if tool
+                # threshold (default 75%) leaves ample headroom; if tool
                 # results push past it, the next API call will report the
                 # real total and trigger compression then.
                 #

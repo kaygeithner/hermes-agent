@@ -628,7 +628,7 @@ All compression settings live in `config.yaml` (no environment variables).
 ```yaml
 compression:
   enabled: true                                     # Toggle compression on/off
-  threshold: 0.50                                   # Compress at this % of context limit
+  threshold: 0.75                                   # Compress at this % of context limit
   target_ratio: 0.20                                # Fraction of threshold to preserve as recent tail
   protect_last_n: 20                                # Min recent messages to keep uncompressed
   protect_first_n: 3                                # Non-system head messages pinned across compactions (0 = pin nothing)
@@ -660,7 +660,7 @@ As of recent releases, editing `model.context_length` or any `compression.*` key
 ```yaml
 compression:
   enabled: true
-  threshold: 0.50
+  threshold: 0.75
 ```
 Uses your main provider and main model. Override per-task (e.g. `auxiliary.compression.provider: openrouter` + `model: google/gemini-2.5-flash`) if you want compression on a cheaper model than your main chat model.
 
