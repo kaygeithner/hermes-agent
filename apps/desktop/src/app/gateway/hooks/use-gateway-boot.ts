@@ -169,6 +169,10 @@ export function useGatewayBoot({
         // Resync state that may have moved on the backend while we were asleep.
         await callbacksRef.current.refreshHermesConfig().catch(() => undefined)
         await callbacksRef.current.refreshSessions().catch(() => undefined)
+
+        if (!cancelled && $desktopBoot.get().error) {
+          completeDesktopBoot()
+        }
       } catch (err) {
         // OAuth session expired mid-reconnect: surface the actionable "sign in
         // again" message once instead of silently looping the backoff against a
@@ -177,6 +181,11 @@ export function useGatewayBoot({
         if (!cancelled && isGatewayReauthRequired(err) && !reauthNotified) {
           reauthNotified = true
           notifyError(err, translateNow('boot.errors.gatewaySignInRequired'))
+        }
+
+        if (!cancelled && bootCompleted && reconnectAttempt >= 6 && !$desktopBoot.get().error) {
+          const message = err instanceof Error ? err.message : String(err)
+          failDesktopBoot(message)
         }
       } finally {
         reconnecting = false
