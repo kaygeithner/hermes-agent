@@ -1,5 +1,29 @@
 import os
+
+import pytest
+
 from agent.cache_redirect import cache_redirect_env, apply_cache_redirect_defaults
+
+_CACHE_VARS = ("PYTHONPYCACHEPREFIX", "MYPY_CACHE_DIR", "RUFF_CACHE_DIR",
+               "PYTEST_ADDOPTS", "npm_config_cache")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cache_env():
+    # apply_cache_redirect_defaults setdefaults these into the REAL os.environ.
+    # Snapshot + restore around every test so none leaks into the shared session
+    # (a full-suite run could otherwise inherit a redirected -o cache_dir /
+    # PYTHONPYCACHEPREFIX in test files that spawn pytest subprocesses).
+    saved = {k: os.environ.get(k) for k in _CACHE_VARS}
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
 
 def test_cache_redirect_env_uses_absolute_paths_under_base(tmp_path):
     env = cache_redirect_env(str(tmp_path))

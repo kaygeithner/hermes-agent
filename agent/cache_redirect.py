@@ -31,8 +31,9 @@ def cache_redirect_env(base_dir: str) -> dict[str, str]:
         "RUFF_CACHE_DIR": os.path.join(base, "ruff"),
         # Relocate pytest's cache_dir (the only one with no dedicated env var)
         # via PYTEST_ADDOPTS. shlex.quote keeps it intact when base has spaces
-        # (pytest parses PYTEST_ADDOPTS with shlex); a repo's own -o cache_dir in
-        # addopts still wins (it is applied after ours).
+        # (pytest parses PYTEST_ADDOPTS with shlex). This -o overrides a repo's
+        # ini cache_dir; the escape hatch is an explicit PYTEST_ADDOPTS, which
+        # setdefault leaves untouched.
         "PYTEST_ADDOPTS": "-o " + shlex.quote("cache_dir=" + os.path.join(base, "pytest")),
         "npm_config_cache": os.path.join(base, "npm"),
     }
