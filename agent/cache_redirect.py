@@ -25,3 +25,14 @@ def apply_cache_redirect_defaults(base_dir: str) -> None:
     os.makedirs(os.path.abspath(base_dir), exist_ok=True)
     for k, v in cache_redirect_env(base_dir).items():
         os.environ.setdefault(k, v)
+
+
+def apply_cache_redirect_from_hermes_home() -> None:
+    """Redirect tool caches under ``$HERMES_HOME/scratch/caches``.
+
+    Called once at startup from ``hermes_cli.main`` immediately after the
+    profile override resolves HERMES_HOME. Reading HERMES_HOME here (rather
+    than at import time) ensures the active profile's home wins. Falls back to
+    ``~/.hermes`` when HERMES_HOME is unset (the default-profile case)."""
+    hermes_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    apply_cache_redirect_defaults(os.path.join(hermes_home, "scratch", "caches"))
