@@ -205,13 +205,9 @@ def _child_cache_redirect_env() -> dict[str, str]:
     ruff/mypy/npm/pycache) out of the child's cwd (e.g. ~/work/). All values are
     non-secret absolute paths under ``$HERMES_HOME/scratch/caches`` — the same
     base the service process uses — so this never weakens credential scrubbing."""
-    from agent.cache_redirect import cache_redirect_env
+    from agent.cache_redirect import cache_redirect_env, hermes_home_cache_base
 
-    base = os.path.join(
-        os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"),
-        "scratch", "caches",
-    )
-    return cache_redirect_env(base)
+    return cache_redirect_env(hermes_home_cache_base())
 
 
 def _sandbox_cache_env_prefix(sandbox_dir: str) -> str:
