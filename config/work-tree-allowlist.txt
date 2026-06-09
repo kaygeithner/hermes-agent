@@ -1,0 +1,20 @@
+# Approved top-level dossiers for ~/work/ on the Hermes VPS.
+#
+# This is the SINGLE SOURCE OF TRUTH for which top-level folders are allowed in
+# the agent's work/ tree. The weekly placement watchdog reads this file and
+# flags any unlisted top-level entry as drift.
+#
+# ADDING A DOSSIER REQUIRES A HUMAN-AUTHORED COMMIT ON THE MAC. The agent must
+# not edit this file to self-approve a new folder; if a new dossier is genuinely
+# needed, a human adds a line here and commits. Lines starting with '#' are
+# comments; blank lines are ignored. One dossier name per line.
+#
+# Seeded 2026-06-08 from the read-only VPS audit (the then-current dossiers).
+ai-agent-tooling-research
+apmt-work-intelligence
+archive
+browser-harness
+context-system
+hermes-context-audits
+hermes-ops
+personal-admin-finance-vendors

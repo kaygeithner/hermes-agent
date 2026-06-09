@@ -197,6 +197,33 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
     return scrubbed
 
 
+def _child_cache_redirect_env() -> dict[str, str]:
+    """Cache-redirect vars to inject into code-exec children AFTER scrubbing.
+
+    ``_scrub_child_env``'s allowlist DROPS these (none match _SAFE_ENV_PREFIXES),
+    so they must be re-injected explicitly to keep child-tool caches (pytest/
+    ruff/mypy/npm/pycache) out of the child's cwd (e.g. ~/work/). All values are
+    non-secret absolute paths under ``$HERMES_HOME/scratch/caches`` — the same
+    base the service process uses — so this never weakens credential scrubbing."""
+    from agent.cache_redirect import cache_redirect_env, hermes_home_cache_base
+
+    return cache_redirect_env(hermes_home_cache_base())
+
+
+def _sandbox_cache_env_prefix(sandbox_dir: str) -> str:
+    """Shell-quoted env assignments redirecting path-based tool caches under an
+    absolute dir inside the (ephemeral, host-isolated) remote sandbox, so they
+    stay out of the executed script's cwd. Tidiness only — the remote fs cannot
+    pollute the host's ~/work/. Only the 3 path-based vars are mirrored here."""
+    base = f"{sandbox_dir}/.caches"
+    parts = [
+        f"PYTHONPYCACHEPREFIX={shlex.quote(base + '/pycache')}",
+        f"MYPY_CACHE_DIR={shlex.quote(base + '/mypy')}",
+        f"RUFF_CACHE_DIR={shlex.quote(base + '/ruff')}",
+    ]
+    return " ".join(parts)
+
+
 def check_sandbox_requirements() -> bool:
     """Code execution sandbox requires a POSIX OS for Unix domain sockets."""
     if not SANDBOX_AVAILABLE:
@@ -949,7 +976,8 @@ def _execute_remote(
         # Build environment variable prefix for the script
         env_prefix = (
             f"HERMES_RPC_DIR={shlex.quote(f'{sandbox_dir}/rpc')} "
-            f"PYTHONDONTWRITEBYTECODE=1"
+            f"PYTHONDONTWRITEBYTECODE=1 "
+            f"{_sandbox_cache_env_prefix(sandbox_dir)}"
         )
         tz = os.getenv("HERMES_TIMEZONE", "").strip()
         if tz:
@@ -1223,6 +1251,11 @@ def execute_code(
         child_env = _scrub_child_env(os.environ)
         child_env["HERMES_RPC_SOCKET"] = rpc_endpoint
         child_env["PYTHONDONTWRITEBYTECODE"] = "1"
+        # Belt-and-suspenders: re-inject cache-redirect vars that _scrub_child_env
+        # drops (none match _SAFE_ENV_PREFIXES), so any absolute-path-respecting
+        # tool the child runs keeps caches out of its cwd (e.g. ~/work/). All
+        # values are non-secret paths under $HERMES_HOME/scratch/caches.
+        child_env.update(_child_cache_redirect_env())
         # Force UTF-8 for the child's stdio and default file encoding.
         #
         # Without this, on Windows sys.stdout is bound to the console code

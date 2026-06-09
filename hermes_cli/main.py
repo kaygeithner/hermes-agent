@@ -395,6 +395,15 @@ def _apply_profile_override() -> None:
 
 _apply_profile_override()
 
+# Redirect tool caches (pytest/ruff/mypy/npm/pycache) to an absolute scratch
+# dir under HERMES_HOME so they never land in the agent's cwd (e.g. ~/work/).
+# Runs AFTER _apply_profile_override() so HERMES_HOME is authoritative; the
+# gateway, dashboard, in-gateway cron, and bash/terminal children all inherit
+# this process env. setdefault-only, so an explicit override still wins.
+from agent.cache_redirect import apply_cache_redirect_from_hermes_home
+
+apply_cache_redirect_from_hermes_home()
+
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from hermes_cli.config import get_hermes_home
