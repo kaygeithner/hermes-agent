@@ -1,28 +1,22 @@
 import os
 
-import pytest
+from agent.cache_redirect import (
+    CACHE_ENV_VARS,
+    apply_cache_redirect_defaults,
+    cache_redirect_env,
+)
 
-from agent.cache_redirect import cache_redirect_env, apply_cache_redirect_defaults
+# apply_cache_redirect_defaults setdefaults these into the REAL os.environ; the
+# autouse ``_isolate_cache_redirect_env`` fixture in tests/conftest.py snapshots
+# and restores the whole CACHE_ENV_VARS set around every test, so nothing here
+# leaks into the shared session (or a pytest subprocess a later test spawns).
 
-_CACHE_VARS = ("PYTHONPYCACHEPREFIX", "MYPY_CACHE_DIR", "RUFF_CACHE_DIR",
-               "PYTEST_ADDOPTS", "npm_config_cache")
 
-
-@pytest.fixture(autouse=True)
-def _isolate_cache_env():
-    # apply_cache_redirect_defaults setdefaults these into the REAL os.environ.
-    # Snapshot + restore around every test so none leaks into the shared session
-    # (a full-suite run could otherwise inherit a redirected -o cache_dir /
-    # PYTHONPYCACHEPREFIX in test files that spawn pytest subprocesses).
-    saved = {k: os.environ.get(k) for k in _CACHE_VARS}
-    try:
-        yield
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+def test_cache_env_vars_matches_producer_keys(tmp_path):
+    # CACHE_ENV_VARS must enumerate exactly the keys cache_redirect_env emits, so
+    # the test-isolation fixture and code-exec injection can rely on it as the
+    # single source of truth.
+    assert set(CACHE_ENV_VARS) == set(cache_redirect_env(str(tmp_path)))
 
 
 def test_cache_redirect_env_uses_absolute_paths_under_base(tmp_path):
@@ -35,6 +29,20 @@ def test_cache_redirect_env_uses_absolute_paths_under_base(tmp_path):
     # pytest cache disabled OR redirected; npm cache redirected.
     assert "PYTEST_ADDOPTS" in env
     assert "npm_config_cache" in env
+
+def test_cache_redirect_env_omits_pycache_when_bytecode_disabled(tmp_path):
+    # Bytecode-disabled callers (the code-exec child / remote sandbox run with
+    # PYTHONDONTWRITEBYTECODE=1, so __pycache__ is never written) get a dead
+    # PYTHONPYCACHEPREFIX. The producer owns that omission via include_pycache so
+    # each such caller doesn't have to remember to pop the key itself.
+    env = cache_redirect_env(str(tmp_path), include_pycache=False)
+    assert "PYTHONPYCACHEPREFIX" not in env
+    # Every other relocation still comes through.
+    assert env["MYPY_CACHE_DIR"].startswith(str(tmp_path))
+    assert {"MYPY_CACHE_DIR", "RUFF_CACHE_DIR", "PYTEST_ADDOPTS", "npm_config_cache"} <= set(env)
+    # The default still includes it (the service process may write bytecode).
+    assert "PYTHONPYCACHEPREFIX" in cache_redirect_env(str(tmp_path))
+
 
 def test_apply_defaults_does_not_clobber_existing(tmp_path, monkeypatch):
     monkeypatch.setenv("RUFF_CACHE_DIR", "/already/set")

@@ -202,26 +202,48 @@ def _child_cache_redirect_env() -> dict[str, str]:
 
     ``_scrub_child_env``'s allowlist DROPS these (none match _SAFE_ENV_PREFIXES),
     so they must be re-injected explicitly to keep child-tool caches (pytest/
-    ruff/mypy/npm/pycache) out of the child's cwd (e.g. ~/work/). All values are
+    ruff/mypy/npm) out of the child's cwd (e.g. ~/work/). All values are
     non-secret absolute paths under ``$HERMES_HOME/scratch/caches`` — the same
-    base the service process uses — so this never weakens credential scrubbing."""
+    base the service process uses — so this never weakens credential scrubbing.
+
+    PYTHONPYCACHEPREFIX is omitted (include_pycache=False): the child runs with
+    PYTHONDONTWRITEBYTECODE=1 (see ``execute_code``), so no ``__pycache__`` is
+    ever written and the prefix would be a dead no-op. The producer owns that
+    omission so this caller doesn't have to pop the key itself."""
     from agent.cache_redirect import cache_redirect_env, hermes_home_cache_base
 
-    return cache_redirect_env(hermes_home_cache_base())
+    return cache_redirect_env(hermes_home_cache_base(), include_pycache=False)
+
+
+def _inject_child_cache_redirect(child_env: dict[str, str]) -> None:
+    """setdefault cache-redirect vars into an already-scrubbed child env.
+
+    setdefault, NOT update: a cache var the user explicitly opted into
+    ``terminal.env_passthrough`` survives ``_scrub_child_env`` (the passthrough
+    check runs before the prefix allowlist), and clobbering it would contradict
+    the startup contract that an explicit override always wins. Vars the user
+    did not pass through are absent post-scrub and so get the scratch default."""
+    for k, v in _child_cache_redirect_env().items():
+        child_env.setdefault(k, v)
 
 
 def _sandbox_cache_env_prefix(sandbox_dir: str) -> str:
-    """Shell-quoted env assignments redirecting path-based tool caches under an
-    absolute dir inside the (ephemeral, host-isolated) remote sandbox, so they
-    stay out of the executed script's cwd. Tidiness only — the remote fs cannot
-    pollute the host's ~/work/. Only the 3 path-based vars are mirrored here."""
+    """Shell-quoted env assignments redirecting path-based tool caches under a
+    dir inside the (ephemeral, host-isolated) remote sandbox, so they stay out
+    of the executed script's cwd. Tidiness only — the remote fs cannot pollute
+    the host's ~/work/.
+
+    ``sandbox_dir`` is ALWAYS a remote POSIX path (created via ``mkdir -p`` over
+    ``env.execute``), so the dirs are built with plain POSIX concatenation rather
+    than reusing ``cache_redirect_env`` — that producer runs the paths through
+    HOST-OS ``os.path``, which on a Windows desktop driving a remote POSIX
+    backend would ship drive-letter/backslash paths to the remote bash. Only the
+    two directory-path caches are mirrored: the remote script runs with
+    PYTHONDONTWRITEBYTECODE=1 (so a pycache prefix is dead), and the pytest/npm
+    caches aren't exercised inside the sandbox."""
     base = f"{sandbox_dir}/.caches"
-    parts = [
-        f"PYTHONPYCACHEPREFIX={shlex.quote(base + '/pycache')}",
-        f"MYPY_CACHE_DIR={shlex.quote(base + '/mypy')}",
-        f"RUFF_CACHE_DIR={shlex.quote(base + '/ruff')}",
-    ]
-    return " ".join(parts)
+    env = {"MYPY_CACHE_DIR": f"{base}/mypy", "RUFF_CACHE_DIR": f"{base}/ruff"}
+    return " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
 
 
 def check_sandbox_requirements() -> bool:
@@ -1266,7 +1288,9 @@ def execute_code(
         # drops (none match _SAFE_ENV_PREFIXES), so any absolute-path-respecting
         # tool the child runs keeps caches out of its cwd (e.g. ~/work/). All
         # values are non-secret paths under $HERMES_HOME/scratch/caches.
-        child_env.update(_child_cache_redirect_env())
+        # setdefault (see _inject_child_cache_redirect) so an explicit
+        # env_passthrough value the user set still wins.
+        _inject_child_cache_redirect(child_env)
         # Force UTF-8 for the child's stdio and default file encoding.
         #
         # Without this, on Windows sys.stdout is bound to the console code

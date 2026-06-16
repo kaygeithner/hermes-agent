@@ -8,6 +8,17 @@ import shlex
 
 logger = logging.getLogger(__name__)
 
+# Single source of truth for the env vars cache_redirect_env relocates. The
+# test-isolation fixture (tests/conftest.py) and the code-exec child injection
+# consume this so they can never drift from the producer below.
+CACHE_ENV_VARS: tuple[str, ...] = (
+    "PYTHONPYCACHEPREFIX",
+    "MYPY_CACHE_DIR",
+    "RUFF_CACHE_DIR",
+    "PYTEST_ADDOPTS",
+    "npm_config_cache",
+)
+
 
 def hermes_home_cache_base() -> str:
     """Absolute cache-scratch base under HERMES_HOME (falls back to ~/.hermes).
@@ -18,15 +29,19 @@ def hermes_home_cache_base() -> str:
     return os.path.join(hermes_home, "scratch", "caches")
 
 
-def cache_redirect_env(base_dir: str) -> dict[str, str]:
+def cache_redirect_env(base_dir: str, *, include_pycache: bool = True) -> dict[str, str]:
     """Return cache env vars pointing under an ABSOLUTE base_dir.
 
     Every cache is RELOCATED, not disabled, so cache-backed features keep
     working — pytest in particular keeps --lf/--ff/--sw because we move its
-    cache_dir via -o rather than switching the cache plugin off."""
+    cache_dir via -o rather than switching the cache plugin off.
+
+    ``include_pycache=False`` drops PYTHONPYCACHEPREFIX for callers that run the
+    target with PYTHONDONTWRITEBYTECODE=1 (the code-exec child): no __pycache__
+    is ever written, so the prefix is a dead no-op. Keeping the omission in the
+    producer means those callers don't each have to remember to pop the key."""
     base = os.path.abspath(base_dir)
-    return {
-        "PYTHONPYCACHEPREFIX": os.path.join(base, "pycache"),
+    env = {
         "MYPY_CACHE_DIR": os.path.join(base, "mypy"),
         "RUFF_CACHE_DIR": os.path.join(base, "ruff"),
         # Relocate pytest's cache_dir (the only one with no dedicated env var)
@@ -37,6 +52,9 @@ def cache_redirect_env(base_dir: str) -> dict[str, str]:
         "PYTEST_ADDOPTS": "-o " + shlex.quote("cache_dir=" + os.path.join(base, "pytest")),
         "npm_config_cache": os.path.join(base, "npm"),
     }
+    if include_pycache:
+        env["PYTHONPYCACHEPREFIX"] = os.path.join(base, "pycache")
+    return env
 
 
 def apply_cache_redirect_defaults(base_dir: str) -> None:

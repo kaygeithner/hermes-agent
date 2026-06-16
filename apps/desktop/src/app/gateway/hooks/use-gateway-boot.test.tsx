@@ -1,7 +1,9 @@
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { translateNow } from '@/i18n'
 import { $desktopBoot } from '@/store/boot'
+import { $notifications, clearNotifications } from '@/store/notifications'
 import { $gatewayState } from '@/store/session'
 
 import { useGatewayBoot } from './use-gateway-boot'
@@ -58,13 +60,18 @@ class FakeWebSocket {
 
   close() {
     this.readyState = FakeWebSocket.CLOSED
-    this.emit('close', {})
+    // A real WebSocket fires its 'close' event asynchronously — by the time it
+    // lands, JsonRpcGatewayClient.close() has already nulled this.socket, so the
+    // client's close listener short-circuits and can't be relied on to flip
+    // state. Model that timing here so the test can't mask a client that fails
+    // to transition connectionState off 'open' after an explicit close().
+    setTimeout(() => this.emit('close', {}), 0)
   }
 
   // Force-drop an open socket, as a sleeping laptop / restarted remote would.
   drop() {
     this.readyState = FakeWebSocket.CLOSED
-    this.emit('close', {})
+    setTimeout(() => this.emit('close', {}), 0)
   }
 
   private emit(type: string, ev: unknown) {
@@ -104,13 +111,19 @@ function fakeDesktop() {
   }
 }
 
-function Harness() {
+function Harness({
+  refreshHermesConfig = async () => undefined,
+  refreshSessions = async () => undefined
+}: {
+  refreshHermesConfig?: () => Promise<void>
+  refreshSessions?: () => Promise<void>
+} = {}) {
   useGatewayBoot({
     handleGatewayEvent: () => undefined,
     onConnectionReady: () => undefined,
     onGatewayReady: () => undefined,
-    refreshHermesConfig: async () => undefined,
-    refreshSessions: async () => undefined
+    refreshHermesConfig,
+    refreshSessions
   })
 
   return null
@@ -124,6 +137,7 @@ beforeEach(() => {
   FakeWebSocket.instances = []
   ;(globalThis as { WebSocket: unknown }).WebSocket = FakeWebSocket
   ;(window as { hermesDesktop?: unknown }).hermesDesktop = fakeDesktop()
+  clearNotifications()
   $gatewayState.set('idle')
   $desktopBoot.set({
     error: null,
@@ -265,5 +279,145 @@ describe('useGatewayBoot remote reconnect loop (real hook, fake socket)', () => 
 
     expect($gatewayState.get()).toBe('open')
     expect($desktopBoot.get().error).toBeNull()
+  })
+
+  it('FIX: a reconnect whose resync FAILS does not clear the error (no ready UI over stale data)', async () => {
+    // The socket can reopen while the backend still cannot serve config/sessions
+    // (mid-restart). Completing the boot then would paint a "ready" UI over
+    // stale/empty data — so a failed resync must NOT clear the recovery surface.
+    let allowResync = true
+
+    const refreshSessions = vi.fn(async () => {
+      if (!allowResync) {
+        throw new Error('backend mid-restart: sessions unavailable')
+      }
+    })
+
+    render(<Harness refreshSessions={refreshSessions} />)
+    await flushAsync()
+
+    // Surface the recoverable error via a prolonged drop (as the prior test).
+    FakeWebSocket.mode = 'fail'
+    act(() => FakeWebSocket.instances[0].drop())
+    await flushAsync()
+
+    for (let i = 0; i < 8; i += 1) {
+      await advanceBackoff()
+    }
+
+    expect($desktopBoot.get().error).toBeTruthy()
+
+    // The remote's SOCKET returns, but the backend can't serve the resync yet.
+    FakeWebSocket.mode = 'open'
+    allowResync = false
+    await advanceBackoff()
+
+    // Socket opened, but because the resync failed the error must remain — the
+    // hook does not falsely report the desktop as ready.
+    expect($desktopBoot.get().error).toBeTruthy()
+
+    // Backend finishes restarting: a later reconnect's resync succeeds → cleared.
+    allowResync = true
+    await advanceBackoff()
+    await advanceBackoff()
+    expect($gatewayState.get()).toBe('open')
+    expect($desktopBoot.get().error).toBeNull()
+  })
+
+  it('FIX: a socket that reopens but keeps failing resync backs off instead of hammering at ~1Hz', async () => {
+    // The backend accepts the WebSocket but 503s its RPCs while mid-restart, so
+    // every cycle is open → resync-fail → close. onState('open') resets
+    // reconnectAttempt each cycle, so a backoff keyed only on reconnectAttempt
+    // would stay flat at ~1s and pound a fragile backend with a reconnect +
+    // double-RPC storm. The resyncFailures counter must drive growth instead.
+    let allowResync = true
+
+    const refreshSessions = vi.fn(async () => {
+      if (!allowResync) {
+        throw new Error('backend mid-restart: sessions unavailable')
+      }
+    })
+
+    render(<Harness refreshSessions={refreshSessions} />)
+    await flushAsync()
+    expect($gatewayState.get()).toBe('open')
+
+    // The socket will keep reopening, but the resync now fails every time.
+    allowResync = false
+    act(() => FakeWebSocket.instances[0].drop())
+    await flushAsync()
+
+    const before = FakeWebSocket.instances.length
+    // Over a 60s window a flat ~1s backoff would mint ~30-60 sockets; the
+    // resyncFailures-driven backoff ramps to the 15s cap, so only a handful do.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000)
+    })
+    const minted = FakeWebSocket.instances.length - before
+
+    expect(minted).toBeGreaterThan(0) // it IS still retrying, not wedged
+    expect(minted).toBeLessThan(12) // …but with growing backoff, not ~1Hz
+  })
+
+  it('FIX: repeated wake signals during a sustained reauth outage do not stack sign-in toasts', async () => {
+    // The one-shot reauth guard exists to surface "sign in again" ONCE per
+    // disconnect episode, not once per attempt — a dead OAuth ticket fails every
+    // reconnect, and re-firing the toast (+ its haptics) on each wake signal is
+    // exactly the spam it must prevent. An episode ends on a clean socket open,
+    // NOT on a wake nudge, so clustered visibility/online events during the same
+    // outage must not re-arm it.
+    render(<Harness />)
+    await flushAsync()
+    expect($gatewayState.get()).toBe('open')
+
+    const desktop = window.hermesDesktop as unknown as ReturnType<typeof fakeDesktop>
+    desktop.getConnection = vi.fn(async () => {
+      throw Object.assign(new Error('socket closed'), { needsOauthLogin: true })
+    })
+
+    FakeWebSocket.mode = 'fail'
+    act(() => FakeWebSocket.instances[0].drop())
+    await flushAsync()
+
+    // First failed reconnect → exactly one sign-in toast.
+    await advanceBackoff()
+    const reauthTitle = translateNow('boot.errors.gatewaySignInRequired')
+    const countReauthToasts = () => $notifications.get().filter(n => n.title === reauthTitle).length
+    expect(countReauthToasts()).toBe(1)
+
+    // The user alt-tabs / the network flaps repeatedly during the SAME outage.
+    for (let i = 0; i < 5; i += 1) {
+      act(() => window.dispatchEvent(new Event('online')))
+      await flushAsync()
+    }
+
+    // Still exactly one — the guard held across every wake signal.
+    expect(countReauthToasts()).toBe(1)
+  })
+
+  it('FIX: a reauth failure surfaces the actionable sign-in copy, not the raw transport string', async () => {
+    render(<Harness />)
+    await flushAsync()
+    expect($gatewayState.get()).toBe('open')
+
+    // The remote drops and the OAuth ticket is dead: every reconnect now fails
+    // with a reauth-required error (needsOauthLogin). Same desktop object the
+    // hook captured, so overriding getConnection is visible to it.
+    const desktop = window.hermesDesktop as unknown as ReturnType<typeof fakeDesktop>
+    desktop.getConnection = vi.fn(async () => {
+      throw Object.assign(new Error('socket closed'), { needsOauthLogin: true })
+    })
+
+    FakeWebSocket.mode = 'fail'
+    act(() => FakeWebSocket.instances[0].drop())
+    await flushAsync()
+
+    for (let i = 0; i < 8; i += 1) {
+      await advanceBackoff()
+    }
+
+    // Block B surfaced the actionable sign-in message on the recovery overlay,
+    // not the opaque 'socket closed' transport string.
+    expect($desktopBoot.get().error).toBe(translateNow('boot.errors.gatewaySignInRequired'))
   })
 })

@@ -185,8 +185,18 @@ export class JsonRpcGatewayClient {
   }
 
   close(): void {
-    this.socket?.close()
+    // Transition state synchronously rather than relying on the socket's 'close'
+    // event. A real WebSocket fires 'close' asynchronously; by the time it lands
+    // this.socket has been nulled below, so the close listener's identity guard
+    // (this.socket !== socket) short-circuits and never runs setState/reject.
+    // Null the socket FIRST so that (eventual) listener no-ops, then own the
+    // teardown here — otherwise an explicit close() would leave connectionState
+    // stuck on 'open', wedging callers that gate retries on a non-open state.
+    const socket = this.socket
     this.socket = null
+    socket?.close()
+    this.setState('closed')
+    this.rejectAllPending(new Error(this.options.closedErrorMessage))
   }
 
   on<P = unknown>(type: GatewayEventName, handler: (event: GatewayEvent<P>) => void): () => void {

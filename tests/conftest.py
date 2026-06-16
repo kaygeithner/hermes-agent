@@ -402,6 +402,42 @@ def _isolate_hermes_home(_hermetic_environment):
     return None
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cache_redirect_env(_hermetic_environment):
+    """Snapshot/restore the cache-redirect env vars around every test.
+
+    ``hermes_cli.main`` redirects tool caches at import time via
+    ``apply_cache_redirect_from_hermes_home()``, which writes
+    PYTEST_ADDOPTS / PYTHONPYCACHEPREFIX / MYPY_CACHE_DIR / RUFF_CACHE_DIR /
+    npm_config_cache with raw ``os.environ.setdefault`` — NOT monkeypatch. So a
+    test that imports or re-imports hermes_cli.main (e.g. the env-loader /
+    dashboard-lifecycle tests) would otherwise leak a redirected cache_dir into
+    later tests in the same file, and into any ``pytest`` subprocess they spawn
+    (pointing at an already-deleted per-test tempdir → order-dependent
+    flakiness).
+
+    Depends on ``_hermetic_environment`` so HERMES_HOME is already the per-test
+    tempdir before we clear the redirect: a mid-test main import then writes
+    cache paths under the isolated home rather than the developer's real
+    ~/.hermes. See ``agent.cache_redirect.CACHE_ENV_VARS`` (the single source of
+    the var set)."""
+    from agent.cache_redirect import CACHE_ENV_VARS
+
+    saved = {k: os.environ.get(k) for k in CACHE_ENV_VARS}
+    # Clear ambient redirects so each test starts from a known-clean state and a
+    # mid-test main import re-derives them from the isolated HERMES_HOME.
+    for k in CACHE_ENV_VARS:
+        os.environ.pop(k, None)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 # ── Module-level state reset — replaced by per-file process isolation ──────
 #
 # Each test FILE runs in a freshly-spawned ``python -m pytest <file>``

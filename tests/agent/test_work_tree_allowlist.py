@@ -30,6 +30,15 @@ def test_load_allowlist_seed_file_has_expected_dossiers():
     }
 
 
+def test_load_allowlist_ignores_slash_only_lines(tmp_path):
+    # A stray slash-only line ('/', '///') passes the blank check but rstrips to
+    # '' — it must not inject an empty-string member into the approved set (which
+    # would make an empty-named dossier silently "approved").
+    p = tmp_path / "allow.txt"
+    p.write_text("alpha\n/\n///\nbeta\n", encoding="utf-8")
+    assert load_allowlist(str(p)) == {"alpha", "beta"}
+
+
 def test_load_allowlist_missing_file_raises(tmp_path):
     import pytest
     with pytest.raises(FileNotFoundError):

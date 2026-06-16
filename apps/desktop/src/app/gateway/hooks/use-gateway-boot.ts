@@ -108,9 +108,16 @@ export function useGatewayBoot({
     let reconnecting = false
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let reconnectAttempt = 0
+    // Consecutive post-reconnect resync failures: the socket reopened but the
+    // backend couldn't serve config/sessions yet (mid-restart). Tracked apart
+    // from reconnectAttempt because a healthy socket-open resets that counter,
+    // which would otherwise mask a backend that accepts sockets but serves no RPCs.
+    let resyncFailures = 0
     // Surface "sign in again" once per disconnect episode, not on every backoff
     // tick — a stale OAuth ticket fails every attempt and would otherwise stack
-    // identical error toasts (and their haptics). Reset on the next clean open.
+    // identical error toasts (and their haptics). An episode ends only on a
+    // clean socket open (onState('open') resets this); wake signals do NOT
+    // re-arm it (see reconnectNow) since they cluster during a single outage.
     let reauthNotified = false
     // Raised once the reconnect loop crosses RECONNECT_ESCALATE_AFTER so the
     // recovery overlay replaces the dead-end CONNECTING screen. Reset on a clean
@@ -165,12 +172,44 @@ export function useGatewayBoot({
           return
         }
 
-        reconnectAttempt = 0
         // Resync state that may have moved on the backend while we were asleep.
-        await callbacksRef.current.refreshHermesConfig().catch(() => undefined)
-        await callbacksRef.current.refreshSessions().catch(() => undefined)
+        // The reconnect counts as successful only if BOTH refreshes land: a
+        // socket that reopened but whose backend can't serve these yet (mid-
+        // restart, expired ticket) is NOT usable, and completing the boot here
+        // would paint a ready UI over stale/empty config + sessions. (reconnect-
+        // Attempt was already reset to 0 by the onState('open') handler.)
+        let resyncOk = true
+        await callbacksRef.current.refreshHermesConfig().catch(() => {
+          resyncOk = false
+        })
+        await callbacksRef.current.refreshSessions().catch(() => {
+          resyncOk = false
+        })
 
-        if (!cancelled && $desktopBoot.get().error) {
+        if (cancelled) {
+          return
+        }
+
+        if (!resyncOk) {
+          resyncFailures += 1
+
+          // Surface the recoverable error after a few consecutive failures — the
+          // initial-boot path treats a failed resync as fatal too — so the user
+          // gets the recovery surface instead of an endless silent spinner.
+          if (bootCompleted && resyncFailures >= 3 && !$desktopBoot.get().error) {
+            failDesktopBoot(translateNow('boot.errors.desktopBootFailed'))
+          }
+
+          // Drop the unusable socket so the standard backoff retries cleanly: an
+          // open socket short-circuits every reconnect path (gatewayOpen()).
+          gateway.close()
+
+          return
+        }
+
+        resyncFailures = 0
+
+        if ($desktopBoot.get().error) {
           completeDesktopBoot()
         }
       } catch (err) {
@@ -178,13 +217,23 @@ export function useGatewayBoot({
         // again" message once instead of silently looping the backoff against a
         // ticket that can never succeed. Transport failures fall through to the
         // backoff in the finally block below.
-        if (!cancelled && isGatewayReauthRequired(err) && !reauthNotified) {
+        const reauthRequired = isGatewayReauthRequired(err)
+
+        if (!cancelled && reauthRequired && !reauthNotified) {
           reauthNotified = true
           notifyError(err, translateNow('boot.errors.gatewaySignInRequired'))
         }
 
         if (!cancelled && bootCompleted && reconnectAttempt >= 6 && !$desktopBoot.get().error) {
-          const message = err instanceof Error ? err.message : String(err)
+          // For a reauth failure show the actionable "sign in again" copy on the
+          // recovery overlay, not the opaque transport string — no amount of
+          // backoff fixes an expired ticket.
+          const message = reauthRequired
+            ? translateNow('boot.errors.gatewaySignInRequired')
+            : err instanceof Error
+              ? err.message
+              : String(err)
+
           failDesktopBoot(message)
         }
       } finally {
@@ -206,8 +255,13 @@ export function useGatewayBoot({
         return
       }
 
-      // 1s, 2s, 4s … capped at 15s.
-      const delay = Math.min(15_000, 1_000 * 2 ** Math.min(reconnectAttempt, 4))
+      // 1s, 2s, 4s … capped at 15s. A socket that keeps reopening but failing
+      // its resync resets reconnectAttempt every cycle (via onState('open')),
+      // so fold resyncFailures into the exponent — otherwise the open → resync-
+      // fail → close loop would hammer a mid-restart backend at a flat ~1Hz
+      // (reconnect + double-RPC storm) instead of backing off.
+      const attempt = Math.max(reconnectAttempt, resyncFailures)
+      const delay = Math.min(15_000, 1_000 * 2 ** Math.min(attempt, 4))
       reconnectAttempt += 1
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null
@@ -223,6 +277,13 @@ export function useGatewayBoot({
       clearReconnectTimer()
       reconnectAttempt = 0
       escalated = false
+      // NB: we deliberately do NOT re-arm the one-shot reauth toast here. Wake
+      // signals (power resume / network online / window visible) cluster — a
+      // user alt-tabbing or a flapping network fires several in a row — and a
+      // dead OAuth ticket fails every reconnect, so re-arming per wake collapses
+      // the "once per disconnect episode" guard into per-attempt toast + haptic
+      // spam. An episode ends on a clean socket open (onState('open') clears the
+      // flag), not on a wake nudge.
       reconnectSecondaryGateways()
 
       if (!gatewayOpen()) {
