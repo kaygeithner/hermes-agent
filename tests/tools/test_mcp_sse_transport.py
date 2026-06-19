@@ -6,7 +6,7 @@ due to stale-branch divergence:
 1. ``sse_read_timeout`` is set to 300s (not the tool timeout). SSE servers
    commonly hold the stream idle for minutes between events; a 60s read
    timeout drops the connection after the first slow stretch. Original
-   observation: Router Teamwork / Supermemory on Cloudflare Workers dropping
+   observation: Router Teamwork on Cloudflare Workers dropping
    at ~60s idle.
 
 2. OAuth auth is forwarded to ``sse_client`` when configured. Previously the

@@ -2075,8 +2075,8 @@ class MCPServerTask:
             # minutes between events, so a 60s read timeout drops the
             # connection after the first slow stretch. 300s matches the
             # Streamable HTTP code path's httpx read timeout below. Original
-            # observation from @amiller in PR #5981 (Router Teamwork,
-            # Supermemory on Cloudflare Workers idle-disconnect at ~60s).
+            # observation from @amiller in PR #5981 (Router Teamwork on
+            # Cloudflare Workers idle-disconnect at ~60s).
             _sse_kwargs: dict = {
                 "url": url,
                 "headers": headers or None,

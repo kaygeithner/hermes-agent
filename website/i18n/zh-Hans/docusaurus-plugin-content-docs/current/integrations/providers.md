@@ -1315,7 +1315,6 @@ model:
 | OpenAI TTS + 语音转录 | [OpenAI](https://platform.openai.com/api-keys) | `VOICE_TOOLS_OPENAI_KEY` |
 | Mistral TTS + 语音转录 | [Mistral](https://console.mistral.ai/) | `MISTRAL_API_KEY` |
 | 跨会话用户建模 | [Honcho](https://honcho.dev/) | `HONCHO_API_KEY` |
-| 语义长期记忆 | [Supermemory](https://supermemory.ai) | `SUPERMEMORY_API_KEY` |
 
 ### 自托管 Firecrawl
 

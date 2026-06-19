@@ -259,7 +259,7 @@ hermes-agent/
 │   │                     #   yuanbao, webhook, api_server, ...). See ADDING_A_PLATFORM.md.
 │   └── builtin_hooks/    # Extension point for always-registered gateway hooks (none shipped)
 ├── plugins/              # Plugin system (see "Plugins" section below)
-│   ├── memory/           # Memory-provider plugins (honcho, mem0, supermemory, ...)
+│   ├── memory/           # Memory-provider plugins (honcho, mem0, ...)
 │   ├── context_engine/   # Context-engine plugins
 │   ├── model-providers/  # Inference backend plugins (openrouter, anthropic, gmi, ...)
 │   ├── kanban/           # Multi-agent board dispatcher + worker plugin
@@ -772,7 +772,7 @@ explicitly (it's idempotent).
 ### Memory-provider plugins (`plugins/memory/<name>/`)
 
 Separate discovery system for pluggable memory backends. Current built-in
-providers include **honcho, mem0, supermemory, byterover, hindsight,
+providers include **honcho, mem0, byterover, hindsight,
 holographic, openviking, retaindb**.
 
 Each provider implements the `MemoryProvider` ABC (see `agent/memory_provider.py`)

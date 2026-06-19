@@ -1,12 +1,12 @@
 ---
 sidebar_position: 4
 title: "Memory Providers"
-description: "外部记忆提供者插件 — Honcho、OpenViking、Mem0、Hindsight、Holographic、RetainDB、ByteRover、Supermemory"
+description: "外部记忆提供者插件 — Honcho、OpenViking、Mem0、Hindsight、Holographic、RetainDB、ByteRover"
 ---
 
 # Memory Providers
 
-Hermes Agent 内置 8 个外部记忆提供者插件，为 Agent 提供跨会话的持久化知识，超越内置的 MEMORY.md 和 USER.md。同一时间只能激活**一个**外部提供者——内置记忆始终与其并行工作。
+Hermes Agent 内置 7 个外部记忆提供者插件，为 Agent 提供跨会话的持久化知识，超越内置的 MEMORY.md 和 USER.md。同一时间只能激活**一个**外部提供者——内置记忆始终与其并行工作。
 
 ## 快速开始
 
@@ -22,7 +22,7 @@ hermes memory off        # 禁用外部提供者
 
 ```yaml
 memory:
-  provider: openviking   # 或 honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory
+  provider: openviking   # 或 honcho, mem0, hindsight, holographic, retaindb, byterover
 ```
 
 ## 工作原理
@@ -460,68 +460,6 @@ hermes config set memory.provider byterover
 
 ---
 
-### Supermemory
-
-语义长期记忆，具备 profile 召回、语义搜索、显式记忆工具，以及通过 Supermemory graph API 进行会话结束时的对话导入。
-
-| | |
-|---|---|
-| **适合场景** | 带用户 profile 和会话级图谱构建的语义召回 |
-| **依赖** | `pip install supermemory` + [API key](http://app.supermemory.ai/integrations?connect=hermes) |
-| **数据存储** | Supermemory Cloud |
-| **费用** | Supermemory 定价 |
-
-**工具：** `supermemory_store`（保存显式记忆）、`supermemory_search`（语义相似度搜索）、`supermemory_forget`（按 ID 或最佳匹配查询遗忘）、`supermemory_profile`（持久化 profile + 近期上下文）
-
-**安装：**
-```bash
-hermes memory setup    # 选择 "supermemory"
-# 或手动配置：
-hermes config set memory.provider supermemory
-echo 'SUPERMEMORY_API_KEY=***' >> ~/.hermes/.env
-```
-
-**配置：** `$HERMES_HOME/supermemory.json`
-
-| 键 | 默认值 | 描述 |
-|-----|---------|-------------|
-| `container_tag` | `hermes` | 用于搜索和写入的容器标签。支持 `{identity}` 模板用于 profile 范围隔离。 |
-| `auto_recall` | `true` | 在每轮对话前注入相关记忆上下文 |
-| `auto_capture` | `true` | 每次响应后存储清理过的用户-助手轮次 |
-| `max_recall_results` | `10` | 格式化为上下文的最大召回条目数 |
-| `profile_frequency` | `50` | 在第一轮及每 N 轮包含 profile 事实 |
-| `capture_mode` | `all` | 默认跳过过短或无意义的轮次 |
-| `search_mode` | `hybrid` | 搜索模式：`hybrid`、`memories` 或 `documents` |
-| `api_timeout` | `5.0` | SDK 和导入请求的超时时间 |
-
-**环境变量：** `SUPERMEMORY_API_KEY`（必填）、`SUPERMEMORY_CONTAINER_TAG`（覆盖配置）。
-
-**主要特性：**
-- 自动上下文隔离——从捕获的轮次中剥离已召回的记忆，防止递归记忆污染
-- 在会话边界时将整个会话**一次性导入**
-- 会话结束时同时导入到对话端点（`/v4/conversations`），用于 Supermemory 的 profile 和图谱构建
-- 在第一轮及可配置间隔注入 profile 事实
-- **Profile 范围容器**——在 `container_tag` 中使用 `{identity}`（例如 `hermes-{identity}` → `hermes-coder`），按 Hermes profile 隔离记忆
-- **多容器模式**——启用 `enable_custom_container_tags` 并配置 `custom_containers` 列表，让 Agent 跨命名容器读写。自动操作（同步、预取）保持在主容器上。
-
-<details>
-<summary>多容器示例</summary>
-
-```json
-{
-  "container_tag": "hermes",
-  "enable_custom_container_tags": true,
-  "custom_containers": ["project-alpha", "shared-knowledge"],
-  "custom_container_instructions": "Use project-alpha for coding context."
-}
-```
-
-</details>
-
-**支持：** [Discord](https://supermemory.link/discord) · [support@supermemory.com](mailto:support@supermemory.com)
-
----
-
 ## 提供者对比
 
 | 提供者 | 存储 | 费用 | 工具数 | 依赖 | 独特特性 |
@@ -533,14 +471,13 @@ echo 'SUPERMEMORY_API_KEY=***' >> ~/.hermes/.env
 | **Holographic** | 本地 | 免费 | 2 | 无 | HRR 代数 + 信任评分 |
 | **RetainDB** | 云端 | $20/月 | 5 | `requests` | 增量压缩 |
 | **ByteRover** | 本地/云端 | 免费/付费 | 3 | `brv` CLI | 预压缩提取 |
-| **Supermemory** | 云端 | 付费 | 4 | `supermemory` | 上下文隔离 + 会话图谱导入 + 多容器 |
 
 ## Profile 隔离
 
 每个提供者的数据按 [profile](/user-guide/profiles) 隔离：
 
 - **本地存储提供者**（Holographic、ByteRover）使用 `$HERMES_HOME/` 路径，各 profile 路径不同
-- **配置文件提供者**（Honcho、Mem0、Hindsight、Supermemory）将配置存储在 `$HERMES_HOME/` 中，每个 profile 拥有独立凭证
+- **配置文件提供者**（Honcho、Mem0、Hindsight）将配置存储在 `$HERMES_HOME/` 中，每个 profile 拥有独立凭证
 - **云端提供者**（RetainDB）自动派生 profile 范围的项目名称
 - **环境变量提供者**（OpenViking）通过每个 profile 的 `.env` 文件配置
 
