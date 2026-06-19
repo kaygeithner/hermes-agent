@@ -1,14 +1,14 @@
 ---
 name: code-change-and-review
-description: "Loop a change through an independent Codex reviewer until it converges clean."
-version: 1.0.0
+description: "Use when a non-trivial change is done and correctness matters. Loops the diff through an independent Codex reviewer until it converges clean."
+version: 1.0.1
 author: Hermes Agent (adapted from a Claude Code dogfood run)
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [code-review, codex, adversarial-review, convergence, tdd, verification, pre-commit]
-    related_skills: [test-driven-development, requesting-code-review, subagent-driven-development, systematic-debugging]
+    related_skills: [test-driven-development, requesting-code-review, systematic-debugging]
 ---
 
 # Code Change and Review
@@ -24,7 +24,7 @@ repeat until the reviewer returns no blocking/major issues.
 independent eyes on the *current* diff; stop when a fresh reviewer is clean, not
 when you are tired of reviewing.
 
-## When to use
+## When to Use
 
 - After implementing any non-trivial change where a subtle bug would be costly
   (parsing, auth/authz, state machines, money, migrations, concurrency).
@@ -35,7 +35,7 @@ when you are tired of reviewing.
 stronger gate. For a single-pass pre-commit pipeline (static scans + one reviewer
 + auto-fix), use `requesting-code-review` instead.
 
-## The loop
+## The Loop
 
 1. **Make the change with TDD.** RED test → GREEN → refactor. (REQUIRED:
    `test-driven-development`.)
@@ -66,9 +66,9 @@ digraph converge {
 **Converged = a fresh reviewer returns no blocker/major.** Address cheap,
 legitimate minors; use judgment to avoid chasing infinite subjective nits.
 
-## Dispatching the Codex reviewer
+## Dispatching the Codex Reviewer
 
-Spawn a subagent (see `subagent-driven-development`) that runs the Codex CLI
+Spawn a FRESH subagent (e.g. `delegate_task`) that runs the Codex CLI
 non-interactively — `codex exec "<review prompt>"` — WAITS for it to finish,
 captures the full stdout, and returns it verbatim. The prompt MUST:
 
@@ -88,9 +88,9 @@ captures the full stdout, and returns it verbatim. The prompt MUST:
 Each round, spawn a NEW subagent — continuing the same one anchors it on its prior
 findings.
 
-## Common mistakes
+## Common Pitfalls
 
-| Mistake | Fix |
+| Pitfall | Fix |
 |---|---|
 | Reviewing the whole dirty working tree | Scope the review to your feature files explicitly |
 | Reviewer flags intentional design as bugs | Put the deliberate decisions in the prompt |
@@ -101,3 +101,13 @@ findings.
 | Blaming your change for a pre-existing/flaky failure | Reproduce in isolation / on a clean tree before fixing |
 | A quick fix introduces a lint/anti-pattern regression | Re-run lint after every fix, not just at the end |
 | Stopping after one review | Loop until a *fresh* reviewer is clean |
+
+## Verification Checklist
+
+- [ ] The change is green (affected tests + lint) before the first review
+- [ ] The review prompt is scoped to the diff and names the deliberate design decisions
+- [ ] Every finding was verified real before fixing; behavioral fixes went test-first
+- [ ] Lint re-run after every fix, not only at the end
+- [ ] Pre-existing/flaky failures were distinguished from regressions (reproduced in isolation)
+- [ ] A FRESH reviewer ran after the last fix and returned no blocker/major
+- [ ] Converged on a clean fresh review — not stopped on fatigue
