@@ -6,7 +6,7 @@ empty list.
 Before the fix, ``_cleanup_agent_resources`` called
 ``agent.shutdown_memory_provider()`` with no arguments, which in turn
 invoked ``on_session_end([])`` on every memory provider. Providers with
-an empty-guard (Holographic, Hindsight, etc.) exited early and never
+an empty-guard (Hindsight, etc.) exited early and never
 persisted the session's facts, so the next gateway start-up surfaced no
 memories from the prior conversation.
 

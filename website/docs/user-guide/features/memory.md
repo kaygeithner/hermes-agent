@@ -325,7 +325,7 @@ Full details in [Gating agent skill writes](/user-guide/features/skills#gating-a
 
 ## External Memory Providers
 
-For deeper, persistent memory that goes beyond MEMORY.md and USER.md, Hermes ships with 7 external memory provider plugins — including Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, and ByteRover.
+For deeper, persistent memory that goes beyond MEMORY.md and USER.md, Hermes ships with 6 external memory provider plugins — including Honcho, OpenViking, Mem0, Hindsight, RetainDB, and ByteRover.
 
 External providers run **alongside** built-in memory (never replacing it) and add capabilities like knowledge graphs, semantic search, automatic fact extraction, and cross-session user modeling.
 

@@ -1,12 +1,12 @@
 ---
 sidebar_position: 4
 title: "Memory Providers"
-description: "外部记忆提供者插件 — Honcho、OpenViking、Mem0、Hindsight、Holographic、RetainDB、ByteRover"
+description: "外部记忆提供者插件 — Honcho、OpenViking、Mem0、Hindsight、RetainDB、ByteRover"
 ---
 
 # Memory Providers
 
-Hermes Agent 内置 7 个外部记忆提供者插件，为 Agent 提供跨会话的持久化知识，超越内置的 MEMORY.md 和 USER.md。同一时间只能激活**一个**外部提供者——内置记忆始终与其并行工作。
+Hermes Agent 内置 6 个外部记忆提供者插件，为 Agent 提供跨会话的持久化知识，超越内置的 MEMORY.md 和 USER.md。同一时间只能激活**一个**外部提供者——内置记忆始终与其并行工作。
 
 ## 快速开始
 
@@ -22,7 +22,7 @@ hermes memory off        # 禁用外部提供者
 
 ```yaml
 memory:
-  provider: openviking   # 或 honcho, mem0, hindsight, holographic, retaindb, byterover
+  provider: openviking   # 或 honcho, mem0, hindsight, retaindb, byterover
 ```
 
 ## 工作原理
@@ -370,42 +370,6 @@ echo "HINDSIGHT_API_KEY=your-key" >> ~/.hermes/.env
 
 ---
 
-### Holographic
-
-本地 SQLite 事实存储，具备 FTS5 全文搜索、信任评分和 HRR（Holographic Reduced Representations，全息降维表示）用于组合代数查询。
-
-| | |
-|---|---|
-| **适合场景** | 无外部依赖的纯本地高级检索记忆 |
-| **依赖** | 无（SQLite 始终可用）。NumPy 可选，用于 HRR 代数。 |
-| **数据存储** | 本地 SQLite |
-| **费用** | 免费 |
-
-**工具：** `fact_store`（9 个动作：add、search、probe、related、reason、contradict、update、remove、list）、`fact_feedback`（有用/无用评分，用于训练信任评分）
-
-**安装：**
-```bash
-hermes memory setup    # 选择 "holographic"
-# 或手动配置：
-hermes config set memory.provider holographic
-```
-
-**配置：** `plugins.hermes-memory-store` 下的 `config.yaml`
-
-| 键 | 默认值 | 描述 |
-|-----|---------|-------------|
-| `db_path` | `$HERMES_HOME/memory_store.db` | SQLite 数据库路径 |
-| `auto_extract` | `false` | 会话结束时自动提取事实 |
-| `default_trust` | `0.5` | 默认信任评分（0.0–1.0） |
-
-**独特能力：**
-- `probe` — 针对特定实体的代数召回（某人/某物的所有事实）
-- `reason` — 跨多个实体的组合 AND 查询
-- `contradict` — 自动检测冲突事实
-- 信任评分，带非对称反馈（有用 +0.05 / 无用 -0.10）
-
----
-
 ### RetainDB
 
 云端记忆 API，具备混合搜索（向量 + BM25 + 重排序）、7 种记忆类型和增量压缩。
@@ -468,7 +432,6 @@ hermes config set memory.provider byterover
 | **OpenViking** | 自托管 | 免费 | 5 | `openviking` + 服务器 | 文件系统层级 + 分层加载 |
 | **Mem0** | 云端 | 付费 | 3 | `mem0ai` | 服务端 LLM 提取 |
 | **Hindsight** | 云端/本地 | 免费/付费 | 3 | `hindsight-client` | 知识图谱 + reflect 合成 |
-| **Holographic** | 本地 | 免费 | 2 | 无 | HRR 代数 + 信任评分 |
 | **RetainDB** | 云端 | $20/月 | 5 | `requests` | 增量压缩 |
 | **ByteRover** | 本地/云端 | 免费/付费 | 3 | `brv` CLI | 预压缩提取 |
 
@@ -476,7 +439,7 @@ hermes config set memory.provider byterover
 
 每个提供者的数据按 [profile](/user-guide/profiles) 隔离：
 
-- **本地存储提供者**（Holographic、ByteRover）使用 `$HERMES_HOME/` 路径，各 profile 路径不同
+- **本地存储提供者**（ByteRover）使用 `$HERMES_HOME/` 路径，各 profile 路径不同
 - **配置文件提供者**（Honcho、Mem0、Hindsight）将配置存储在 `$HERMES_HOME/` 中，每个 profile 拥有独立凭证
 - **云端提供者**（RetainDB）自动派生 profile 范围的项目名称
 - **环境变量提供者**（OpenViking）通过每个 profile 的 `.env` 文件配置

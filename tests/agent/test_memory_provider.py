@@ -416,18 +416,44 @@ class TestPluginMemoryDiscovery:
     """Memory providers are discovered from plugins/memory/ directory."""
 
     def test_discover_finds_providers(self):
-        """discover_memory_providers returns available providers."""
+        """discover_memory_providers returns the bundled providers.
+
+        discover_memory_providers() is a directory/text scan — it lists a
+        bundled provider even when that provider's optional pip dependency
+        is missing, so the name is always present regardless of availability.
+        """
         from plugins.memory import discover_memory_providers
         providers = discover_memory_providers()
         names = [name for name, _, _ in providers]
-        assert "holographic" in names  # always available (no external deps)
+        assert "mem0" in names  # bundled provider, always discovered
 
-    def test_load_provider_by_name(self):
-        """load_memory_provider returns a working provider instance."""
+    def test_load_provider_by_name(self, tmp_path, monkeypatch):
+        """load_memory_provider returns a working provider instance.
+
+        Uses a dependency-free user plugin so is_available() is True without
+        relying on any bundled provider's optional pip dependency.
+        """
         from plugins.memory import load_memory_provider
-        p = load_memory_provider("holographic")
+        plugin_dir = tmp_path / "plugins" / "loadable"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "__init__.py").write_text(
+            "from agent.memory_provider import MemoryProvider\n"
+            "class MyProvider(MemoryProvider):\n"
+            "    @property\n"
+            "    def name(self): return 'loadable'\n"
+            "    def is_available(self): return True\n"
+            "    def initialize(self, **kw): pass\n"
+            "    def sync_turn(self, *a, **kw): pass\n"
+            "    def get_tool_schemas(self): return []\n"
+            "    def handle_tool_call(self, *a, **kw): return '{}'\n"
+        )
+        monkeypatch.setattr(
+            "plugins.memory._get_user_plugins_dir",
+            lambda: tmp_path / "plugins",
+        )
+        p = load_memory_provider("loadable")
         assert p is not None
-        assert p.name == "holographic"
+        assert p.name == "loadable"
         assert p.is_available()
 
     def test_load_nonexistent_returns_none(self):
@@ -475,7 +501,7 @@ class TestUserInstalledProviderDiscovery:
         providers = discover_memory_providers()
         names = [n for n, _, _ in providers]
         assert "myexternal" in names
-        assert "holographic" in names  # bundled still found
+        assert "mem0" in names  # bundled still found
 
     def test_load_user_plugin(self, tmp_path, monkeypatch):
         """load_memory_provider() can load from $HERMES_HOME/plugins/."""
@@ -493,14 +519,17 @@ class TestUserInstalledProviderDiscovery:
     def test_bundled_takes_precedence(self, tmp_path, monkeypatch):
         """Bundled provider wins when user plugin has the same name."""
         from plugins.memory import load_memory_provider, discover_memory_providers
-        # Create user plugin named "holographic" (same as bundled)
-        plugin_dir = tmp_path / "plugins" / "holographic"
+        # Create user plugin named "mem0" (same as a bundled provider).
+        # mem0's __init__ imports only stdlib + agent modules at module top
+        # (its optional mem0ai dep is imported lazily), so the bundled module
+        # loads cleanly even without the pip package installed.
+        plugin_dir = tmp_path / "plugins" / "mem0"
         plugin_dir.mkdir(parents=True)
         (plugin_dir / "__init__.py").write_text(
             "from agent.memory_provider import MemoryProvider\n"
             "class Fake(MemoryProvider):\n"
             "    @property\n"
-            "    def name(self): return 'holographic-FAKE'\n"
+            "    def name(self): return 'mem0-FAKE'\n"
             "    def is_available(self): return True\n"
             "    def initialize(self, **kw): pass\n"
             "    def sync_turn(self, *a, **kw): pass\n"
@@ -511,15 +540,15 @@ class TestUserInstalledProviderDiscovery:
             "plugins.memory._get_user_plugins_dir",
             lambda: tmp_path / "plugins",
         )
-        # Load should return bundled (name "holographic"), not user (name "holographic-FAKE")
-        p = load_memory_provider("holographic")
+        # Load should return bundled (name "mem0"), not user (name "mem0-FAKE")
+        p = load_memory_provider("mem0")
         assert p is not None
-        assert p.name == "holographic"  # bundled wins
+        assert p.name == "mem0"  # bundled wins
 
         # discover should not duplicate
         providers = discover_memory_providers()
-        holo_count = sum(1 for n, _, _ in providers if n == "holographic")
-        assert holo_count == 1
+        mem0_count = sum(1 for n, _, _ in providers if n == "mem0")
+        assert mem0_count == 1
 
     def test_non_memory_user_plugins_excluded(self, tmp_path, monkeypatch):
         """User plugins that don't reference MemoryProvider are skipped."""
