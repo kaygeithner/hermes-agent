@@ -1861,6 +1861,20 @@ BROWSER_TOOL_SCHEMAS = [
         }
     },
     {
+        "name": "browser_frame",
+        "description": "Switch the browser context into an iframe, or back to the main page. Use when browser_snapshot shows bare 'Iframe [ref=eN]' nodes (embedded players, cross-origin widgets): call with that ref, then browser_snapshot again to see the iframe's content with clickable refs. Call with 'main' to return to the top page.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "Iframe ref from the snapshot (e.g., '@e2') to enter, or 'main' to return to the top-level page"
+                }
+            },
+            "required": ["target"]
+        }
+    },
+    {
         "name": "browser_type",
         "description": "Type text into an input field identified by its ref ID. Clears the field first, then types the new text. Requires browser_navigate and browser_snapshot to be called first.",
         "parameters": {
@@ -2636,34 +2650,34 @@ def _extract_relevant_content(
 
 
 def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
-    """Structure-aware truncation for snapshots.
+    '''Structure-aware truncation that keeps the head AND the tail.
 
-    Cuts at line boundaries so that accessibility tree elements are never
-    split mid-line, and appends a note telling the agent how much was
-    omitted.
-
-    Args:
-        snapshot_text: The snapshot text to truncate
-        max_chars: Maximum characters to keep
-
-    Returns:
-        Truncated text with indicator if truncated
-    """
+    Page-end content (NEXT/nav footers, submit buttons) is high-value and
+    was previously always the casualty of head-only truncation.
+    '''
     if len(snapshot_text) <= max_chars:
         return snapshot_text
 
+    tail_budget = min(1800, max_chars // 4)
+    head_budget = max_chars - tail_budget - 120
     lines = snapshot_text.split('\n')
-    result: list[str] = []
+    head = []
     chars = 0
     for line in lines:
-        if chars + len(line) + 1 > max_chars - 80:  # reserve space for note
+        if chars + len(line) + 1 > head_budget:
             break
-        result.append(line)
+        head.append(line)
         chars += len(line) + 1
-    remaining = len(lines) - len(result)
-    if remaining > 0:
-        result.append(f'\n[... {remaining} more lines truncated, use browser_snapshot for full content]')
-    return '\n'.join(result)
+    tail = []
+    chars = 0
+    for line in reversed(lines[len(head):]):
+        if chars + len(line) + 1 > tail_budget:
+            break
+        tail.insert(0, line)
+        chars += len(line) + 1
+    omitted = len(lines) - len(head) - len(tail)
+    note = '\n[... %d lines omitted from the MIDDLE; the END of the page follows ...]\n' % omitted
+    return '\n'.join(head) + note + '\n'.join(tail)
 
 
 def _redact_browser_output(value: Any) -> Any:
@@ -3053,6 +3067,43 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
         response = {
             "success": False,
             "error": result.get("error", f"Failed to click {ref}")
+        }
+        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+
+
+def browser_frame(target: str, task_id: Optional[str] = None) -> str:
+    """
+    Switch the active browser context into an iframe (by ref) or back to main.
+
+    Args:
+        target: Iframe ref from the snapshot (e.g., "@e2") or "main"
+        task_id: Task identifier for session isolation
+
+    Returns:
+        JSON string with switch result
+    """
+    if _is_camofox_mode():
+        return json.dumps({"success": False, "error": "frame switching is not supported in camofox mode"})
+
+    effective_task_id = _last_session_key(task_id or "default")
+
+    t = (target or "").strip()
+    if t != "main" and not t.startswith("@"):
+        t = f"@{t}"
+
+    result = _run_browser_command(effective_task_id, "frame", [t])
+
+    if result.get("success"):
+        response = {
+            "success": True,
+            "frame": t,
+            "note": "Context switched. Call browser_snapshot to see this frame's content."
+        }
+        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+    else:
+        response = {
+            "success": False,
+            "error": result.get("error", f"Failed to switch frame to {t}")
         }
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
@@ -4743,6 +4794,14 @@ registry.register(
     handler=lambda args, **kw: browser_click(ref=args.get("ref", ""), task_id=kw.get("task_id")),
     check_fn=check_browser_requirements,
     emoji="👆",
+)
+registry.register(
+    name="browser_frame",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_frame"],
+    handler=lambda args, **kw: browser_frame(target=args.get("target", "main"), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🖼️",
 )
 registry.register(
     name="browser_type",
