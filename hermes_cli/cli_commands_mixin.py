@@ -294,6 +294,14 @@ class CLICommandsMixin:
         agent_running = getattr(self, "_agent_running", False)
         _cprint(f"  Agent: {'running' if agent_running else 'idle'}")
 
+    def _handle_artifacts_command(self, cmd: str) -> None:
+        """Handle /artifacts — profile-local artifact library."""
+        from cli import _cprint
+        from hermes_cli.artifacts import handle_artifacts_command
+
+        for line in handle_artifacts_command(cmd).splitlines() or [""]:
+            _cprint(f"  {line}" if line else "")
+
     def _handle_paste_command(self):
         """Handle /paste — explicitly check clipboard for an image.
 

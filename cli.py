@@ -8477,6 +8477,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._handle_stop_command()
         elif canonical == "agents":
             self._handle_agents_command()
+        elif canonical == "artifacts":
+            self._handle_artifacts_command(cmd_original)
         elif canonical == "background":
             self._handle_background_command(cmd_original)
         elif canonical == "queue":

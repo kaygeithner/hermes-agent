@@ -112,6 +112,14 @@ class TestResolveCommand:
         assert resolve_command("codex_runtime").name == "codex-runtime"
         assert resolve_command("tasks").name == "agents"
 
+    def test_artifacts_command_registered(self):
+        cmd = resolve_command("artifacts")
+        assert cmd is not None
+        assert cmd.name == "artifacts"
+        assert cmd.subcommands == ("list", "show", "add", "scan")
+        assert cmd.cli_only is True
+        assert "artifacts" not in GATEWAY_KNOWN_COMMANDS
+
     def test_topic_is_gateway_command(self):
         topic = resolve_command("topic")
         assert topic is not None
