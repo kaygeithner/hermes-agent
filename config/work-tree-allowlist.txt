@@ -1,0 +1,9 @@
+# Approved top-level /home/linuxuser/work dossiers.
+# Human-owned source of truth for check-work-tree.py. Do not add transient caches/scratch here.
+apmt-work-intelligence
+archive
+browser-harness
+context-system
+hermes-context-audits
+hermes-ops
+personal-admin-finance-vendors
