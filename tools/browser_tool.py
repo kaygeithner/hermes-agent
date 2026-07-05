@@ -2023,6 +2023,20 @@ BROWSER_TOOL_SCHEMAS = [
         }
     },
     {
+        "name": "browser_frame",
+        "description": "Switch the browser context into an iframe, or back to the main page. Use when browser_snapshot shows bare 'Iframe [ref=eN]' nodes (embedded players, cross-origin widgets): call with that ref, then browser_snapshot again to see the iframe's content with clickable refs. Call with 'main' to return to the top page.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "Iframe ref from the snapshot (e.g., '@e2') to enter, or 'main' to return to the top-level page"
+                }
+            },
+            "required": ["target"]
+        }
+    },
+    {
         "name": "browser_type",
         "description": "Type text into an input field identified by its ref ID. Clears the field first, then types the new text. Requires browser_navigate and browser_snapshot to be called first.",
         "parameters": {
@@ -2873,48 +2887,42 @@ def _extract_relevant_content(
 
 
 def _truncate_snapshot(snapshot_text: str, max_chars: int = SNAPSHOT_SUMMARIZE_THRESHOLD) -> str:
-    """Structure-aware truncation for snapshots.
-
-    Cuts at line boundaries so that accessibility tree elements are never
-    split mid-line. The full snapshot is saved to cache/web (same pattern as
-    web_extract's truncate-and-store) and the appended note tells the agent
-    exactly where the complete text lives and how to page through it with
-    read_file — element refs beyond the cut are in the file, not lost.
-
-    Args:
-        snapshot_text: The snapshot text to truncate
-        max_chars: Maximum characters to keep
-
-    Returns:
-        Truncated text with a stored-full-text pointer if truncated
-    """
+    """Keep useful page head/tail content and persist the complete snapshot."""
     if len(snapshot_text) <= max_chars:
         return snapshot_text
 
     stored_path = _store_full_snapshot(snapshot_text)
+    lines = snapshot_text.split("\n")
+    tail_budget = min(1800, max_chars // 4)
+    note_budget = min(180 + len(stored_path or ""), max_chars // 2)
+    head_budget = max(0, max_chars - tail_budget - note_budget)
 
-    lines = snapshot_text.split('\n')
-    result: list[str] = []
+    head = []
     chars = 0
-    # Reserve space for the truncation note (the stored-path variant is the
-    # longer of the two). Clamp so tiny max_chars values still keep content.
-    reserve = min(110 + len(stored_path or ""), max_chars // 2)
     for line in lines:
-        if chars + len(line) + 1 > max_chars - reserve:
+        if chars + len(line) + 1 > head_budget:
             break
-        result.append(line)
+        head.append(line)
         chars += len(line) + 1
-    remaining = len(lines) - len(result)
-    if remaining > 0:
-        if stored_path:
-            next_line = len(result) + 1
-            result.append(
-                f'\n[... {remaining} more lines truncated — full snapshot: '
-                f'read_file path="{stored_path}" offset={next_line} limit=200]'
-            )
-        else:
-            result.append(f'\n[... {remaining} more lines truncated, use browser_snapshot for full content]')
-    return '\n'.join(result)
+
+    tail = []
+    chars = 0
+    for line in reversed(lines[len(head):]):
+        if chars + len(line) + 1 > tail_budget:
+            break
+        tail.insert(0, line)
+        chars += len(line) + 1
+
+    omitted = len(lines) - len(head) - len(tail)
+    if stored_path:
+        note = (
+            f'\n[... {omitted} lines omitted from the MIDDLE; full snapshot: '
+            f'read_file path="{stored_path}" offset={len(head) + 1} limit=200; '
+            'the END of the page follows ...]\n'
+        )
+    else:
+        note = f"\n[... {omitted} lines omitted from the MIDDLE; the END of the page follows ...]\n"
+    return "\n".join(head) + note + "\n".join(tail)
 
 
 def _redact_browser_output(value: Any) -> Any:
@@ -3304,6 +3312,43 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
         response = {
             "success": False,
             "error": result.get("error", f"Failed to click {ref}")
+        }
+        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+
+
+def browser_frame(target: str, task_id: Optional[str] = None) -> str:
+    """
+    Switch the active browser context into an iframe (by ref) or back to main.
+
+    Args:
+        target: Iframe ref from the snapshot (e.g., "@e2") or "main"
+        task_id: Task identifier for session isolation
+
+    Returns:
+        JSON string with switch result
+    """
+    if _is_camofox_mode():
+        return json.dumps({"success": False, "error": "frame switching is not supported in camofox mode"})
+
+    effective_task_id = _last_session_key(task_id or "default")
+
+    t = (target or "").strip()
+    if t != "main" and not t.startswith("@"):
+        t = f"@{t}"
+
+    result = _run_browser_command(effective_task_id, "frame", [t])
+
+    if result.get("success"):
+        response = {
+            "success": True,
+            "frame": t,
+            "note": "Context switched. Call browser_snapshot to see this frame's content."
+        }
+        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+    else:
+        response = {
+            "success": False,
+            "error": result.get("error", f"Failed to switch frame to {t}")
         }
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
@@ -5038,6 +5083,14 @@ registry.register(
     handler=lambda args, **kw: browser_click(ref=args.get("ref", ""), task_id=kw.get("task_id")),
     check_fn=check_browser_requirements,
     emoji="👆",
+)
+registry.register(
+    name="browser_frame",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_frame"],
+    handler=lambda args, **kw: browser_frame(target=args.get("target", "main"), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🖼️",
 )
 registry.register(
     name="browser_type",
