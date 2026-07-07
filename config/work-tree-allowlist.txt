@@ -1,5 +1,14 @@
-# Approved top-level /home/linuxuser/work dossiers.
-# Human-owned source of truth for check-work-tree.py. Do not add transient caches/scratch here.
+# Approved top-level dossiers for ~/work/ on the Hermes VPS.
+#
+# This is the SINGLE SOURCE OF TRUTH for which top-level folders are allowed in
+# the agent's work/ tree. The weekly placement watchdog (check-work-tree.py)
+# reads this file and flags any unlisted top-level entry as drift.
+#
+# ADDING A DOSSIER REQUIRES A HUMAN-AUTHORED COMMIT ON THE MAC. The agent must
+# not edit this file to self-approve a new folder; if a new dossier is genuinely
+# needed, a human adds a line here and commits. Lines starting with '#' are
+# comments; blank lines are ignored. One dossier name per line.
+# Do not add transient caches/scratch here.
 apmt-work-intelligence
 archive
 browser-harness
