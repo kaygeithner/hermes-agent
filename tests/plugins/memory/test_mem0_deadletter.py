@@ -246,8 +246,6 @@ def test_transient_404_flap_is_not_dropped(tmp_path, monkeypatch):
 
 
 def test_attempts_bump_preserves_file_position(tmp_path, monkeypatch):
-    backend = FakeBackend(fail=False)
-
     class HeadFails(FakeBackend):
         def add(self, messages, **kwargs):
             if messages[0]["content"].endswith("older"):  # stale replays carry a date note
