@@ -225,6 +225,7 @@ class Mem0MemoryProvider(MemoryProvider):
         self._prefetch_query = ""
         self._prefetch_result = ""
         self._prefetch_done = False
+        self._replay_thread = None
         # Circuit breaker state
         self._consecutive_failures = 0
         self._breaker_open_until = 0.0
@@ -518,9 +519,17 @@ class Mem0MemoryProvider(MemoryProvider):
 
     @staticmethod
     def _deadletter_write(path, lines: list) -> None:
-        """Atomically replace the queue file (caller holds the locks)."""
+        """Atomically replace the queue file (caller holds the locks).
+
+        fsync before the rename — without it a power loss shortly after the
+        rename can leave an empty/zero-filled file on writeback filesystems,
+        losing the whole queue in one shot.
+        """
         tmp = path.with_suffix(".jsonl.tmp")
-        tmp.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(("\n".join(lines) + "\n") if lines else "")
+            f.flush()
+            os.fsync(f.fileno())
         atomic_replace(tmp, path)
 
     @staticmethod
@@ -578,9 +587,13 @@ class Mem0MemoryProvider(MemoryProvider):
             )
         return queued
 
-    def _deadletter_mutate(self, remove: list, add: list = ()) -> None:
-        """Remove entries (first occurrence each) and append replacements,
-        in one atomic rewrite."""
+    def _deadletter_mutate(self, remove: list = (), replace: dict = None) -> None:
+        """Remove entries and/or replace them IN PLACE, in one atomic rewrite.
+
+        Replacement preserves file position: the byte-cap trim evicts from the
+        head, so re-appending an updated entry at the tail would shield a
+        failing entry from eviction while sacrificing newer healthy turns.
+        """
         with self._deadletter_lock:
             path = self._deadletter_path()
             with MemoryStore._file_lock(path):
@@ -589,21 +602,59 @@ class Mem0MemoryProvider(MemoryProvider):
                 except OSError:
                     return
                 lines = self._split_entries(raw)
+                for old, new in (replace or {}).items():
+                    if old in lines:
+                        lines[lines.index(old)] = new
                 for line in remove:
                     if line in lines:
                         lines.remove(line)
-                lines.extend(add)
                 self._deadletter_write(path, lines)
+
+    def _start_deadletter_replay(self, backend) -> None:
+        """Kick off a background drain of the queue after a successful sync.
+
+        Runs on its own thread so a long drain (up to 200 entries × ~11s OSS
+        adds) never extends the mem0-sync worker's lifetime — sync_turn's 5s
+        join, and the prefetch queued behind it, stay unaffected. Only the
+        serialized _sync worker calls this, so the check-then-start needs no
+        lock. Concurrent backend use is already the norm here (prefetch
+        searches while syncs add).
+        """
+        try:
+            path = self._deadletter_path()
+            # unlocked fast path: healthy installs that never queued a turn
+            # skip the mkdir/flock machinery entirely (a concurrent first
+            # append is simply picked up after the next successful sync)
+            if not path.exists() or path.stat().st_size == 0:
+                return
+        except OSError:
+            return
+        if self._replay_thread and self._replay_thread.is_alive():
+            return
+
+        def _drain():
+            try:
+                self._deadletter_replay(backend)
+            except Exception as e:
+                logger.warning("Mem0 dead-letter replay error: %s", e)
+
+        self._replay_thread = threading.Thread(
+            target=_drain, daemon=True, name="mem0-replay")
+        self._replay_thread.start()
 
     def _deadletter_replay(self, backend) -> None:
         """Drain queued turns (oldest-ts first) after a successful sync.
 
-        Stops on the first transient failure. Entries that can't ever succeed
-        don't poison the queue head: known client errors are dropped on sight,
-        and anything else is dropped after _DEADLETTER_MAX_ATTEMPTS failures
-        (each while the backend was otherwise healthy). Progress is durable
-        per entry, so a shutdown mid-drain re-replays at most one turn — and
-        mem0's server-side dedup absorbs that.
+        Pauses on failure; a failing entry can't poison the queue — its
+        persisted attempts counter drops it after _DEADLETTER_MAX_ATTEMPTS
+        failures (each while the backend was otherwise healthy). No
+        drop-on-sight for "client errors": a transient 404-shaped flap
+        (qdrant restarting) must not cascade-delete queued turns. Progress
+        is durable per entry, so a shutdown mid-drain re-replays at most one
+        turn — and mem0's server-side dedup absorbs that.
+
+        Each pass parses the file once and replays sequentially; the outer
+        loop re-reads only to pick up entries appended during the drain.
         """
         while True:
             with self._deadletter_lock:
@@ -626,41 +677,37 @@ class Mem0MemoryProvider(MemoryProvider):
                 self._deadletter_mutate(remove=corrupt)
             if not entries:
                 return
-            _, line, entry, messages = min(entries, key=lambda t: t[0])
-            try:
-                backend.add(
-                    messages,
-                    user_id=entry.get("user_id") or self._user_id,
-                    agent_id=entry.get("agent_id") or self._agent_id,
-                    infer=True,
-                    metadata=entry.get("metadata") or {},
-                )
-            except Exception as e:
-                attempts = (entry.get("attempts") or 0) + 1
-                if _is_client_error(e):
+            entries.sort(key=lambda t: t[0])
+            for _, line, entry, messages in entries:
+                try:
+                    backend.add(
+                        messages,
+                        user_id=entry.get("user_id") or self._user_id,
+                        agent_id=entry.get("agent_id") or self._agent_id,
+                        infer=True,
+                        metadata=entry.get("metadata") or {},
+                    )
+                except Exception as e:
+                    attempts = (entry.get("attempts") or 0) + 1
+                    if attempts >= _DEADLETTER_MAX_ATTEMPTS:
+                        logger.warning(
+                            "Mem0 dead-letter entry failed %d replay attempts — dropping it: %s",
+                            attempts, e)
+                        self._deadletter_mutate(remove=[line])
+                        continue
+                    # ponytail: attempts can tick up on the oldest entry during
+                    # a flaky-backend window (sync succeeded, replay add failed)
+                    # — 8 healthy-sync failures before calling one turn poisoned
+                    # is the accepted ceiling
+                    entry["attempts"] = attempts
+                    self._deadletter_mutate(
+                        replace={line: json.dumps(entry, ensure_ascii=False)})
                     logger.warning(
-                        "Mem0 dead-letter entry permanently rejected — dropping it: %s", e)
-                    self._deadletter_mutate(remove=[line])
-                    continue
-                if attempts >= _DEADLETTER_MAX_ATTEMPTS:
-                    logger.warning(
-                        "Mem0 dead-letter entry failed %d replay attempts — dropping it: %s",
-                        attempts, e)
-                    self._deadletter_mutate(remove=[line])
-                    continue
-                # ponytail: attempts can tick up on the oldest entry during a
-                # flaky-backend window (sync succeeded, replay add failed) —
-                # 8 healthy-sync failures before calling one turn poisoned is
-                # the accepted ceiling
-                entry["attempts"] = attempts
-                self._deadletter_mutate(
-                    remove=[line], add=[json.dumps(entry, ensure_ascii=False)])
-                logger.warning(
-                    "Mem0 dead-letter replay paused (%d turns queued, head attempt %d): %s",
-                    len(entries), attempts, e,
-                )
-                return
-            self._deadletter_mutate(remove=[line])
+                        "Mem0 dead-letter replay paused (%d turns queued, attempt %d): %s",
+                        len(entries), attempts, e,
+                    )
+                    return
+                self._deadletter_mutate(remove=[line])
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Send the turn to Mem0 for server-side fact extraction (non-blocking)."""
@@ -694,12 +741,7 @@ class Mem0MemoryProvider(MemoryProvider):
                 else:
                     logger.warning("Mem0 sync failed and turn could not be queued: %s", e)
                 return
-            try:
-                self._deadletter_replay(backend)
-            except Exception as e:
-                # Replay is best-effort — a pop/rewrite error (unwritable state
-                # dir) must not kill the sync worker thread.
-                logger.warning("Mem0 dead-letter replay error: %s", e)
+            self._start_deadletter_replay(backend)
 
         with self._sync_lock:
             if self._sync_thread and self._sync_thread.is_alive():
@@ -824,7 +866,7 @@ class Mem0MemoryProvider(MemoryProvider):
         # abandons the final turn's write in short-lived (oneshot/cron)
         # processes — the exact loss the session-boundary shutdown exists to
         # prevent. Only waits while a sync is actually in flight.
-        for t in (self._prefetch_thread, self._sync_thread):
+        for t in (self._prefetch_thread, self._sync_thread, self._replay_thread):
             if t and t.is_alive():
                 t.join(timeout=30.0)
         self._shutdown_backend()
