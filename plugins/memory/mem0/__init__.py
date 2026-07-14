@@ -53,6 +53,11 @@ _PREFETCH_WAIT_SECS = 3
 
 _CLIENT_ERROR_TYPES = ("MemoryNotFoundError", "ValidationError")
 
+# Dead-letter queue: turns that failed to sync (backend down, breaker open,
+# previous sync still in flight) are appended here and replayed after the
+# next successful sync. Bounded — oldest entries beyond this are dropped.
+_DEADLETTER_MAX = 200
+
 # Sentinel returned when neither MEM0_USER_ID nor a gateway-native id is
 # available. Treated as "no operator-configured user_id" by initialize() so
 # that legacy mem0.json files written by the setup wizard (which historically
@@ -217,6 +222,8 @@ class Mem0MemoryProvider(MemoryProvider):
         self._breaker_lock = threading.Lock()
         self._sync_lock = threading.Lock()
         self._prefetch_lock = threading.Lock()
+        self._deadletter_lock = threading.Lock()
+        self._prefetch_seeded = False
         self._atexit_registered = False
 
     @property
@@ -475,9 +482,116 @@ class Mem0MemoryProvider(MemoryProvider):
         # Slow backend: skip injection; mem0_search tool remains the backstop.
         return ""
 
+    def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
+        # First turn this provider instance sees (fresh session, or resumed
+        # session in a fresh process): queue_prefetch normally runs at the END
+        # of each turn, so there is nothing queued yet and prefetch() would
+        # return empty. This hook fires before prefetch(), which joins the
+        # worker ≤3s — enough for an embed+search round trip — so turn 1 gets
+        # recall injected instead of relying on the model calling mem0_search.
+        if self._prefetch_seeded or not message:
+            return
+        self._prefetch_seeded = True
+        self.queue_prefetch(message)
+
+    # -- Dead-letter queue ----------------------------------------------------
+
+    def _deadletter_path(self):
+        from hermes_constants import get_hermes_home
+        return get_hermes_home() / "state" / "mem0-deadletter.jsonl"
+
+    def _deadletter_write(self, path, lines: list) -> None:
+        """Rewrite the dead-letter file atomically (caller holds the lock)."""
+        if not lines:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return
+        tmp = path.with_suffix(".jsonl.tmp")
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+
+    def _deadletter_append(self, user_content: str, assistant_content: str) -> None:
+        """Queue a turn whose sync was dropped, so it can be replayed later."""
+        try:
+            entry = json.dumps({
+                "ts": time.time(),
+                "messages": [
+                    {"role": "user", "content": user_content},
+                    {"role": "assistant", "content": assistant_content},
+                ],
+                "user_id": self._user_id,
+                "agent_id": self._agent_id,
+                "metadata": self._write_metadata(),
+            }, ensure_ascii=False)
+            with self._deadletter_lock:
+                path = self._deadletter_path()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(entry + "\n")
+                lines = path.read_text(encoding="utf-8").splitlines()
+                if len(lines) > _DEADLETTER_MAX:
+                    self._deadletter_write(path, lines[-_DEADLETTER_MAX:])
+        except Exception as e:
+            logger.debug("Mem0 dead-letter append failed: %s", e)
+
+    def _deadletter_pop(self, line: str) -> None:
+        """Remove one line (first occurrence) from the dead-letter file."""
+        with self._deadletter_lock:
+            path = self._deadletter_path()
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                return
+            if line in lines:
+                lines.remove(line)
+            self._deadletter_write(path, lines)
+
+    def _deadletter_replay(self, backend) -> None:
+        """Drain queued turns after a successful sync; stop on first failure.
+
+        Progress is durable per entry (each replayed line is removed before
+        the next add), so a shutdown mid-drain re-replays at most one turn —
+        and mem0's server-side dedup absorbs that.
+        """
+        while True:
+            with self._deadletter_lock:
+                try:
+                    raw = self._deadletter_path().read_text(encoding="utf-8")
+                except OSError:
+                    return
+            lines = [l for l in raw.splitlines() if l.strip()]
+            if not lines:
+                return
+            line = lines[0]
+            try:
+                entry = json.loads(line)
+                messages = entry["messages"]
+            except Exception:
+                self._deadletter_pop(line)  # corrupt entry — drop it
+                continue
+            try:
+                backend.add(
+                    messages,
+                    user_id=entry.get("user_id") or self._user_id,
+                    agent_id=entry.get("agent_id") or self._agent_id,
+                    infer=True,
+                    metadata=entry.get("metadata") or {},
+                )
+            except Exception as e:
+                logger.warning(
+                    "Mem0 dead-letter replay paused (%d turns queued): %s",
+                    len(lines), e,
+                )
+                return
+            self._deadletter_pop(line)
+
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Send the turn to Mem0 for server-side fact extraction (non-blocking)."""
         if self._backend is None or self._is_breaker_open():
+            # Backend down or breaker open: queue instead of losing the turn.
+            self._deadletter_append(user_content, assistant_content)
             return
 
         def _sync():
@@ -499,13 +613,19 @@ class Mem0MemoryProvider(MemoryProvider):
                 self._record_success()
             except Exception as e:
                 self._record_failure()
-                logger.warning("Mem0 sync failed: %s", e)
+                self._deadletter_append(user_content, assistant_content)
+                logger.warning("Mem0 sync failed (turn queued for replay): %s", e)
+                return
+            self._deadletter_replay(backend)
 
         with self._sync_lock:
             if self._sync_thread and self._sync_thread.is_alive():
                 self._sync_thread.join(timeout=5.0)
-            # If still alive after timeout, skip to avoid duplicate ingestion.
+            # If still alive after timeout, queue the turn (previously it was
+            # skipped outright "to avoid duplicate ingestion" — i.e. dropped);
+            # the in-flight sync's replay pass will pick it up.
             if self._sync_thread and self._sync_thread.is_alive():
+                self._deadletter_append(user_content, assistant_content)
                 return
             self._sync_thread = threading.Thread(target=_sync, daemon=True, name="mem0-sync")
             self._sync_thread.start()
