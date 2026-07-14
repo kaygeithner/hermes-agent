@@ -416,7 +416,25 @@ def _run_agent(
     agent.stream_delta_callback = None
     agent.tool_gen_callback = None
 
-    result = agent.run_conversation(prompt)
+    try:
+        result = agent.run_conversation(prompt)
+    finally:
+        # Oneshot bypasses cli.py and therefore its atexit _run_cleanup, so
+        # nothing else tears the agent down.  Without this, the process exits
+        # while the memory provider's background sync thread is mid-HTTP
+        # (mem0 add → extraction/embedding/upsert): the write is lost every
+        # time, and interpreter teardown intermittently segfaults under the
+        # still-running native client thread (observed as rc=139 after the
+        # answer was already printed).  Both calls are bounded (5s drain +
+        # 5s thread joins) and internally guarded.
+        try:
+            agent.shutdown_memory_provider()
+        except Exception:
+            pass
+        try:
+            agent.close()
+        except Exception:
+            pass
     return (result.get("final_response") or "", result)
 
 
