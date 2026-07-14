@@ -33,6 +33,7 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, List
 
 try:
@@ -226,9 +227,15 @@ class Mem0MemoryProvider(MemoryProvider):
         self._sync_thread = None
         self._replay_thread = None
         self._shutting_down = False
+        self._replay_started_at = 0.0
         # Entries backend.add already ingested whose file removal failed
         # (e.g. ENOSPC) — skipped on later passes so they aren't re-added.
         self._replayed_pending = set()
+        # Resolved on the initialize() thread, where the profile contextvar
+        # override is live — background threads must not call
+        # get_hermes_home() lazily (they'd fall back to the default home and
+        # cross-contaminate profiles).
+        self._hermes_home = ""
         # Circuit breaker state
         self._consecutive_failures = 0
         self._breaker_open_until = 0.0
@@ -355,7 +362,17 @@ class Mem0MemoryProvider(MemoryProvider):
         self._user_id = configured or kwargs.get("user_id") or _DEFAULT_USER_ID
         self._agent_id = self._config.get("agent_id", "hermes")
         self._channel = kwargs.get("platform") or "cli"
-        self._shutting_down = False  # instance may be re-initialized after teardown
+        # Instance may be re-initialized after teardown (cached providers):
+        # reset teardown/session state so a leftover prefetch result from the
+        # previous session is never injected into the new one.
+        self._shutting_down = False
+        self._prefetch_seeded = False
+        with self._prefetch_lock:
+            self._prefetch_result = ""
+        self._hermes_home = str(kwargs.get("hermes_home") or "")
+        if not self._hermes_home:
+            from hermes_constants import get_hermes_home
+            self._hermes_home = str(get_hermes_home())
         self._backend = self._create_backend()
         if self._backend and not self._atexit_registered:
             atexit.register(self._shutdown_backend)
@@ -434,6 +451,10 @@ class Mem0MemoryProvider(MemoryProvider):
     # -- Dead-letter queue ----------------------------------------------------
 
     def _deadletter_path(self):
+        if self._hermes_home:
+            return Path(self._hermes_home) / "state" / "mem0-deadletter.jsonl"
+        # fallback for uninitialized instances (tests) — env-based, so safe
+        # to resolve off-thread
         from hermes_constants import get_hermes_home
         return get_hermes_home() / "state" / "mem0-deadletter.jsonl"
 
@@ -453,7 +474,7 @@ class Mem0MemoryProvider(MemoryProvider):
         losing the whole queue in one shot.
         """
         tmp = path.with_suffix(".jsonl.tmp")
-        with tmp.open("w", encoding="utf-8") as f:
+        with tmp.open("w", encoding="utf-8", newline="\n") as f:
             f.write(("\n".join(lines) + "\n") if lines else "")
             f.flush()
             os.fsync(f.fileno())
@@ -495,7 +516,7 @@ class Mem0MemoryProvider(MemoryProvider):
                             needs_nl = f.read(1) != b"\n"
                     except (OSError, ValueError):
                         pass  # missing or empty file
-                    with path.open("a", encoding="utf-8") as f:
+                    with path.open("a", encoding="utf-8", newline="\n") as f:
                         if needs_nl:
                             f.write("\n")
                         f.write(entry + "\n")
@@ -533,13 +554,15 @@ class Mem0MemoryProvider(MemoryProvider):
                 except FileNotFoundError:
                     return  # nothing to mutate; other read/write errors raise
                 lines = self._split_entries(raw)
+                before = list(lines)
                 for old, new in (replace or {}).items():
                     if old in lines:
                         lines[lines.index(old)] = new
                 for line in remove:
                     if line in lines:
                         lines.remove(line)
-                self._deadletter_write(path, lines)
+                if lines != before:
+                    self._deadletter_write(path, lines)
 
     def _start_deadletter_replay(self, backend) -> None:
         """Kick off a background drain of the queue after a successful sync.
@@ -567,6 +590,14 @@ class Mem0MemoryProvider(MemoryProvider):
         except OSError:
             return
         if self._replay_thread and self._replay_thread.is_alive():
+            # A drain hung on a backend call without a timeout would silently
+            # block draining forever (and hold the cross-process lock) — give
+            # the operator a signal, roughly hourly.
+            if time.monotonic() - self._replay_started_at > 3600:
+                self._replay_started_at = time.monotonic()
+                logger.warning(
+                    "Mem0 dead-letter drain has been running for over an hour — "
+                    "possibly hung on a backend call; queued turns are not draining.")
             return
 
         def _drain():
@@ -586,9 +617,16 @@ class Mem0MemoryProvider(MemoryProvider):
             except Exception as e:
                 logger.warning("Mem0 dead-letter replay error: %s", e)
 
-        self._replay_thread = threading.Thread(
-            target=_drain, daemon=True, name="mem0-replay")
-        self._replay_thread.start()
+        try:
+            self._replay_thread = threading.Thread(
+                target=_drain, daemon=True, name="mem0-replay")
+            self._replay_thread.start()
+            self._replay_started_at = time.monotonic()
+        except Exception as e:
+            # Thread.start() raises RuntimeError at interpreter finalization
+            # (or thread exhaustion) — must not kill the sync worker; the
+            # queue drains on a later sync or the next process.
+            logger.debug("Mem0 dead-letter drain could not start: %s", e)
 
     @staticmethod
     def _try_drain_lock(lock_path):
@@ -635,6 +673,9 @@ class Mem0MemoryProvider(MemoryProvider):
                 try:
                     e = json.loads(line)
                     messages = e["messages"]
+                    if not (isinstance(messages, list)
+                            and all(isinstance(m, dict) for m in messages)):
+                        raise ValueError("malformed messages")
                     ts = e["ts"] if isinstance(e.get("ts"), (int, float)) else 0.0
                     entries.append((ts, line, e, messages))
                 except Exception:
