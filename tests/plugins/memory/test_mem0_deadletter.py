@@ -146,8 +146,56 @@ def test_replay_is_oldest_first_by_ts(tmp_path, monkeypatch):
         f.write(json.dumps({"ts": 20, "messages": [{"role": "user", "content": "newer"}, {"role": "assistant", "content": "a"}]}) + "\n")
         f.write(json.dumps({"ts": 10, "messages": [{"role": "user", "content": "older"}, {"role": "assistant", "content": "a"}]}) + "\n")
     _sync_and_join(p, "live", "a")
-    contents = [m[0]["content"] for m in backend.added]
+    # ts=10/20 are ancient, so replays carry the stale-date annotation —
+    # compare the trailing original content
+    contents = [m[0]["content"].rsplit("\n", 1)[-1] for m in backend.added]
     assert contents == ["live", "older", "newer"]
+
+
+def test_stale_replay_is_date_annotated_fresh_is_not(tmp_path, monkeypatch):
+    backend = FakeBackend(fail=True)
+    p = _provider(tmp_path, monkeypatch, backend)
+    _sync_and_join(p, "fresh fact", "a")  # queued with a just-now ts
+    path = _deadletter(tmp_path)
+    with path.open("a") as f:  # plus one ancient entry
+        f.write(json.dumps({"ts": 1, "messages": [{"role": "user", "content": "old fact"}, {"role": "assistant", "content": "a"}]}) + "\n")
+    backend.fail = False
+    _sync_and_join(p, "live", "a")
+    by_tail = {m[0]["content"].rsplit("\n", 1)[-1]: m[0]["content"] for m in backend.added}
+    assert "restored from an offline queue" in by_tail["old fact"]
+    assert by_tail["fresh fact"] == "fresh fact"  # byte-identical, no note
+
+
+def test_shutdown_flag_stops_drain_without_attempts_bump(tmp_path, monkeypatch):
+    backend = FakeBackend()
+    p = _provider(tmp_path, monkeypatch, backend)
+    p._deadletter_append("queued", "x")
+    p._shutting_down = True
+    # no new drain is spawned during shutdown...
+    p._start_deadletter_replay(backend)
+    assert p._replay_thread is None
+    # ...and a running drain exits between entries without touching attempts
+    p._deadletter_replay(backend)
+    assert backend.added == []
+    entry = json.loads(_deadletter(tmp_path).read_text().splitlines()[0])
+    assert "attempts" not in entry
+
+
+def test_removal_failure_does_not_duplicate_readds(tmp_path, monkeypatch):
+    backend = FakeBackend()
+    p = _provider(tmp_path, monkeypatch, backend)
+    p._deadletter_append("queued", "x")
+
+    def boom(remove=(), replace=None):
+        raise OSError("disk full")
+
+    p._deadletter_mutate = boom
+    _sync_and_join(p, "live1", "a")  # add succeeded, removal failed
+    del p._deadletter_mutate
+    _sync_and_join(p, "live2", "a")  # pending entry is removed, NOT re-added
+    contents = [m[0]["content"] for m in backend.added]
+    assert contents.count("queued") == 1
+    assert _drained(tmp_path)
 
 
 def test_remove_failure_does_not_kill_sync_worker(tmp_path, monkeypatch):
@@ -202,7 +250,7 @@ def test_attempts_bump_preserves_file_position(tmp_path, monkeypatch):
 
     class HeadFails(FakeBackend):
         def add(self, messages, **kwargs):
-            if messages[0]["content"] == "older":
+            if messages[0]["content"].endswith("older"):  # stale replays carry a date note
                 raise ConnectionError("flaky")
             return super().add(messages, **kwargs)
 
