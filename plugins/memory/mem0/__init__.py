@@ -33,11 +33,17 @@ home for these non-secret settings.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import json
 import logging
 import os
 import threading
 import time
+
+try:
+    import fcntl
+except ImportError:  # Windows — cross-process file locking degrades to per-process
+    fcntl = None
 from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
@@ -57,6 +63,11 @@ _CLIENT_ERROR_TYPES = ("MemoryNotFoundError", "ValidationError")
 # previous sync still in flight) are appended here and replayed after the
 # next successful sync. Bounded — oldest entries beyond this are dropped.
 _DEADLETTER_MAX = 200
+# Appends are cheap (no read-back); the trim to _DEADLETTER_MAX only runs
+# once the file grows past this many bytes.
+_DEADLETTER_TRIM_BYTES = 2_000_000
+
+_NULL_LOCK = contextlib.nullcontext()
 
 # Sentinel returned when neither MEM0_USER_ID nor a gateway-native id is
 # available. Treated as "no operator-configured user_id" by initialize() so
@@ -500,20 +511,21 @@ class Mem0MemoryProvider(MemoryProvider):
         from hermes_constants import get_hermes_home
         return get_hermes_home() / "state" / "mem0-deadletter.jsonl"
 
-    def _deadletter_write(self, path, lines: list) -> None:
-        """Rewrite the dead-letter file atomically (caller holds the lock)."""
-        if not lines:
-            try:
-                path.unlink()
-            except OSError:
-                pass
-            return
-        tmp = path.with_suffix(".jsonl.tmp")
-        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
+    @staticmethod
+    def _flock(f) -> None:
+        """Cross-process exclusive lock, released when the file is closed."""
+        if fcntl is not None:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
 
-    def _deadletter_append(self, user_content: str, assistant_content: str) -> None:
-        """Queue a turn whose sync was dropped, so it can be replayed later."""
+    # Splitting is on "\n" only, never str.splitlines(): json.dumps with
+    # ensure_ascii=False leaves U+2028/U+2029/U+0085 unescaped inside entries,
+    # and splitlines() would fragment those entries into "corrupt" pieces.
+    @staticmethod
+    def _split_entries(raw: str) -> list:
+        return [l for l in raw.split("\n") if l.strip()]
+
+    def _deadletter_append(self, user_content: str, assistant_content: str) -> bool:
+        """Queue a turn whose sync was dropped; True if durably queued."""
         try:
             entry = json.dumps({
                 "ts": time.time(),
@@ -529,28 +541,50 @@ class Mem0MemoryProvider(MemoryProvider):
                 path = self._deadletter_path()
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with path.open("a", encoding="utf-8") as f:
+                    self._flock(f)
                     f.write(entry + "\n")
-                lines = path.read_text(encoding="utf-8").splitlines()
-                if len(lines) > _DEADLETTER_MAX:
-                    self._deadletter_write(path, lines[-_DEADLETTER_MAX:])
+                if path.stat().st_size > _DEADLETTER_TRIM_BYTES:
+                    self._deadletter_rewrite(
+                        lambda lines: lines[-_DEADLETTER_MAX:], locked=True,
+                    )
+            return True
         except Exception as e:
-            logger.debug("Mem0 dead-letter append failed: %s", e)
+            logger.warning(
+                "Mem0 dead-letter append failed — turn NOT queued: %s", e,
+            )
+            return False
+
+    def _deadletter_rewrite(self, transform, locked: bool = False) -> None:
+        """Rewrite the queue file in place under flock (drops blank lines).
+
+        In-place truncate+write rather than tmp+rename so the flock held on
+        the open file stays meaningful to concurrent processes.
+        """
+        lock_ctx = self._deadletter_lock if not locked else _NULL_LOCK
+        with lock_ctx:
+            with self._deadletter_path().open("r+", encoding="utf-8", errors="replace") as f:
+                self._flock(f)
+                lines = transform(self._split_entries(f.read()))
+                f.seek(0)
+                f.truncate()
+                if lines:
+                    f.write("\n".join(lines) + "\n")
 
     def _deadletter_pop(self, line: str) -> None:
-        """Remove one line (first occurrence) from the dead-letter file."""
-        with self._deadletter_lock:
-            path = self._deadletter_path()
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except OSError:
-                return
+        """Remove one entry (first occurrence) from the dead-letter file."""
+        def _remove_first(lines):
             if line in lines:
+                lines = list(lines)
                 lines.remove(line)
-            self._deadletter_write(path, lines)
+            return lines
+
+        self._deadletter_rewrite(_remove_first)
 
     def _deadletter_replay(self, backend) -> None:
-        """Drain queued turns after a successful sync; stop on first failure.
+        """Drain queued turns (oldest-ts first) after a successful sync.
 
+        Stops on the first transient failure; permanently-rejected entries
+        (client errors) are dropped so they can't poison the queue head.
         Progress is durable per entry (each replayed line is removed before
         the next add), so a shutdown mid-drain re-replays at most one turn —
         and mem0's server-side dedup absorbs that.
@@ -558,31 +592,42 @@ class Mem0MemoryProvider(MemoryProvider):
         while True:
             with self._deadletter_lock:
                 try:
-                    raw = self._deadletter_path().read_text(encoding="utf-8")
+                    raw = self._deadletter_path().read_text(
+                        encoding="utf-8", errors="replace")
                 except OSError:
                     return
-            lines = [l for l in raw.splitlines() if l.strip()]
-            if not lines:
+            entries, corrupt = [], []
+            for line in self._split_entries(raw):
+                try:
+                    e = json.loads(line)
+                    entries.append((e["ts"] if isinstance(e.get("ts"), (int, float)) else 0.0, line, e))
+                except Exception:
+                    corrupt.append(line)
+            for line in corrupt:
+                self._deadletter_pop(line)
+            if not entries:
                 return
-            line = lines[0]
-            try:
-                entry = json.loads(line)
-                messages = entry["messages"]
-            except Exception:
-                self._deadletter_pop(line)  # corrupt entry — drop it
-                continue
+            _, line, entry = min(entries, key=lambda t: t[0])
             try:
                 backend.add(
-                    messages,
+                    entry["messages"],
                     user_id=entry.get("user_id") or self._user_id,
                     agent_id=entry.get("agent_id") or self._agent_id,
                     infer=True,
                     metadata=entry.get("metadata") or {},
                 )
+            except KeyError:
+                self._deadletter_pop(line)  # structurally invalid — drop
+                continue
             except Exception as e:
+                if _is_client_error(e):
+                    logger.warning(
+                        "Mem0 dead-letter entry permanently rejected — dropping it: %s", e)
+                    self._deadletter_pop(line)
+                    continue
                 logger.warning(
                     "Mem0 dead-letter replay paused (%d turns queued): %s",
-                    len(lines), e,
+                    len(entries), e,
                 )
                 return
             self._deadletter_pop(line)
@@ -597,6 +642,7 @@ class Mem0MemoryProvider(MemoryProvider):
         def _sync():
             backend = self._backend
             if backend is None:
+                self._deadletter_append(user_content, assistant_content)
                 return
             try:
                 messages = [
@@ -613,10 +659,17 @@ class Mem0MemoryProvider(MemoryProvider):
                 self._record_success()
             except Exception as e:
                 self._record_failure()
-                self._deadletter_append(user_content, assistant_content)
-                logger.warning("Mem0 sync failed (turn queued for replay): %s", e)
+                if self._deadletter_append(user_content, assistant_content):
+                    logger.warning("Mem0 sync failed (turn queued for replay): %s", e)
+                else:
+                    logger.warning("Mem0 sync failed and turn could not be queued: %s", e)
                 return
-            self._deadletter_replay(backend)
+            try:
+                self._deadletter_replay(backend)
+            except Exception as e:
+                # Replay is best-effort — a pop/rewrite error (unwritable state
+                # dir) must not kill the sync worker thread.
+                logger.warning("Mem0 dead-letter replay error: %s", e)
 
         with self._sync_lock:
             if self._sync_thread and self._sync_thread.is_alive():
