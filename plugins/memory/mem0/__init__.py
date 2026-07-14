@@ -551,9 +551,14 @@ class Mem0MemoryProvider(MemoryProvider):
             pass
 
     def shutdown(self) -> None:
+        # 30s, not 5s: an OSS-mode add() runs LLM fact extraction inline and
+        # measures ~11s against a remote extraction endpoint. A shorter join
+        # abandons the final turn's write in short-lived (oneshot/cron)
+        # processes — the exact loss the session-boundary shutdown exists to
+        # prevent. Only waits while a sync is actually in flight.
         for t in (self._prefetch_thread, self._sync_thread):
             if t and t.is_alive():
-                t.join(timeout=5.0)
+                t.join(timeout=30.0)
         self._shutdown_backend()
 
 
