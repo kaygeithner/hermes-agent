@@ -40,6 +40,11 @@ import threading
 import time
 from typing import Any, Dict, List
 
+try:
+    import fcntl
+except ImportError:  # Windows — no cross-process drain exclusion (dedup absorbs)
+    fcntl = None
+
 from agent.memory_provider import MemoryProvider
 from tools.memory_tool import MemoryStore
 from tools.registry import tool_error
@@ -388,6 +393,7 @@ class Mem0MemoryProvider(MemoryProvider):
             _rr.lower() in ("true", "1", "yes") if isinstance(_rr, str) else bool(_rr)
         )
         self._channel = kwargs.get("platform") or "cli"
+        self._shutting_down = False  # instance may be re-initialized after teardown
         self._backend = self._create_backend()
         if self._backend and not self._atexit_registered:
             atexit.register(self._shutdown_backend)
@@ -580,6 +586,10 @@ class Mem0MemoryProvider(MemoryProvider):
                         if needs_nl:
                             f.write("\n")
                         f.write(entry + "\n")
+                        f.flush()
+                        # fsync: "queued for replay" must survive a power loss
+                        # — same durability the rewrite path already provides
+                        os.fsync(f.fileno())
                     queued = True
                     try:
                         if path.stat().st_size > _DEADLETTER_TRIM_BYTES:
@@ -648,17 +658,42 @@ class Mem0MemoryProvider(MemoryProvider):
 
         def _drain():
             try:
-                # Cross-process drain lock: two processes sharing HERMES_HOME
-                # (gateway + cron oneshot) must not replay the same snapshot
-                # twice. The second blocks, then finds the file drained.
-                with MemoryStore._file_lock(path.with_suffix(".drain")):
+                # Cross-process drain lock, NON-blocking: two processes sharing
+                # HERMES_HOME (gateway + cron oneshot) must not replay the same
+                # snapshot twice — and the loser must not park in an
+                # uninterruptible flock that stalls its shutdown join; the
+                # holder is draining the queue anyway.
+                lock = self._try_drain_lock(path.with_suffix(".drain.lock"))
+                if lock is None:
+                    return
+                try:
                     self._deadletter_replay(backend)
+                finally:
+                    lock.close()
             except Exception as e:
                 logger.warning("Mem0 dead-letter replay error: %s", e)
 
         self._replay_thread = threading.Thread(
             target=_drain, daemon=True, name="mem0-replay")
         self._replay_thread.start()
+
+    @staticmethod
+    def _try_drain_lock(lock_path):
+        """Acquire the cross-process drain lock without blocking.
+
+        Returns an open file handle holding the flock (close to release),
+        or None if another process's drain holds it. Windows has no fcntl;
+        it degrades to no cross-process exclusion (dedup absorbs overlap).
+        """
+        f = lock_path.open("a")
+        if fcntl is None:
+            return f
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except OSError:
+            f.close()
+            return None
 
     def _deadletter_replay(self, backend) -> None:
         """Drain queued turns (oldest-ts first) after a successful sync.
@@ -753,13 +788,16 @@ class Mem0MemoryProvider(MemoryProvider):
         # ponytail: content annotation because OSS Memory.add rejects the
         # timestamp param (platform-only); switch to timestamp= if OSS mem0
         # ever supports it or the annotation proves too weak
-        age = time.time() - ts if ts else 0
-        if age <= _DEADLETTER_ANNOTATE_AGE_SECS or not messages:
+        if not messages:
             return messages
+        if ts and (time.time() - ts) <= _DEADLETTER_ANNOTATE_AGE_SECS:
+            return messages  # fresh replay — pass through byte-identical
         head = messages[0]
         if not isinstance(head.get("content"), str):
             return messages
-        stamp = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ts))
+        # a missing/mangled ts means unknown age — annotate, don't assume fresh
+        stamp = (time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ts))
+                 if ts else "an unknown earlier time")
         note = (f"[Note: exchange restored from an offline queue; it originally "
                 f"happened at {stamp} — newer memories may supersede it.]\n")
         return [{**head, "content": note + head["content"]}, *messages[1:]]
@@ -908,6 +946,10 @@ class Mem0MemoryProvider(MemoryProvider):
         return tool_error(f"Unknown tool: {tool_name}")
 
     def _shutdown_backend(self):
+        # Also reached via atexit (registered in initialize) — raise the
+        # shutdown flag here so a drain failing against the closed backend
+        # never counts as a poison attempt, whichever teardown path ran.
+        self._shutting_down = True
         try:
             if self._backend:
                 self._backend.close()
