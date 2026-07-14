@@ -181,24 +181,7 @@ def test_shutdown_flag_stops_drain_without_attempts_bump(tmp_path, monkeypatch):
     assert "attempts" not in entry
 
 
-def test_removal_failure_does_not_duplicate_readds(tmp_path, monkeypatch):
-    backend = FakeBackend()
-    p = _provider(tmp_path, monkeypatch, backend)
-    p._deadletter_append("queued", "x")
-
-    def boom(remove=(), replace=None):
-        raise OSError("disk full")
-
-    p._deadletter_mutate = boom
-    _sync_and_join(p, "live1", "a")  # add succeeded, removal failed
-    del p._deadletter_mutate
-    _sync_and_join(p, "live2", "a")  # pending entry is removed, NOT re-added
-    contents = [m[0]["content"] for m in backend.added]
-    assert contents.count("queued") == 1
-    assert _drained(tmp_path)
-
-
-def test_remove_failure_does_not_kill_sync_worker(tmp_path, monkeypatch):
+def test_mutate_failure_survives_and_does_not_duplicate(tmp_path, monkeypatch):
     backend = FakeBackend()
     p = _provider(tmp_path, monkeypatch, backend)
     p._deadletter_append("queued", "x")
@@ -209,13 +192,16 @@ def test_remove_failure_does_not_kill_sync_worker(tmp_path, monkeypatch):
     # plain instance-attribute shadow — NOT monkeypatch.setattr, whose undo()
     # would also revert the HERMES_HOME redirect and touch the real queue
     p._deadletter_mutate = boom
-    _sync_and_join(p, "live1", "a")
-    # replay errored but the workers survived; next sync still works
+    _sync_and_join(p, "live1", "a")  # add succeeded, removal failed
+    # replay errored but the workers survived; next sync still works and the
+    # already-ingested entry is removed, NOT re-added
     del p._deadletter_mutate
     _sync_and_join(p, "live2", "a")
     contents = [m[0]["content"] for m in backend.added]
     assert contents[0] == "live1"
     assert "live2" in contents
+    assert contents.count("queued") == 1
+    assert _drained(tmp_path)
 
 
 def test_transient_404_flap_is_not_dropped(tmp_path, monkeypatch):
