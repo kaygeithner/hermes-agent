@@ -224,6 +224,9 @@ class Mem0MemoryProvider(MemoryProvider):
         self._prefetch_result = ""
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread = None
+        # bumped on re-initialize so a previous session's late-finishing
+        # prefetch can't write its recall into the new session
+        self._prefetch_gen = 0
         self._sync_thread = None
         self._replay_thread = None
         self._shutting_down = False
@@ -369,6 +372,8 @@ class Mem0MemoryProvider(MemoryProvider):
         self._prefetch_seeded = False
         with self._prefetch_lock:
             self._prefetch_result = ""
+            self._prefetch_gen += 1  # invalidate any in-flight prefetch write
+        self._prefetch_thread = None
         self._hermes_home = str(kwargs.get("hermes_home") or "")
         if not self._hermes_home:
             from hermes_constants import get_hermes_home
@@ -414,9 +419,11 @@ class Mem0MemoryProvider(MemoryProvider):
             return ""
         return f"## Mem0 Memory\n{result}"
 
-    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+    def queue_prefetch(self, query: str, *, session_id: str = "") -> bool:
+        """Returns True when a recall search was actually queued."""
         if self._backend is None or self._is_breaker_open():
-            return
+            return False
+        gen = self._prefetch_gen
 
         def _run():
             backend = self._backend
@@ -427,7 +434,8 @@ class Mem0MemoryProvider(MemoryProvider):
                 if results:
                     lines = [r.get("memory", "") for r in results if r.get("memory")]
                     with self._prefetch_lock:
-                        self._prefetch_result = "\n".join(f"- {l}" for l in lines)
+                        if gen == self._prefetch_gen:  # not re-initialized since
+                            self._prefetch_result = "\n".join(f"- {l}" for l in lines)
                 self._record_success()
             except Exception as e:
                 self._record_failure()
@@ -435,6 +443,7 @@ class Mem0MemoryProvider(MemoryProvider):
 
         self._prefetch_thread = threading.Thread(target=_run, daemon=True, name="mem0-prefetch")
         self._prefetch_thread.start()
+        return True
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
         # First turn this provider instance sees (fresh session, or resumed
@@ -445,8 +454,10 @@ class Mem0MemoryProvider(MemoryProvider):
         # recall injected instead of relying on the model calling mem0_search.
         if self._prefetch_seeded or not message:
             return
-        self._prefetch_seeded = True
-        self.queue_prefetch(message)
+        # only burn the seed if a search was actually queued — a breaker-open
+        # no-op on turn 1 leaves the seed for the next turn
+        if self.queue_prefetch(message):
+            self._prefetch_seeded = True
 
     # -- Dead-letter queue ----------------------------------------------------
 
@@ -485,20 +496,34 @@ class Mem0MemoryProvider(MemoryProvider):
         """Bound the queue by entry count, then by bytes (keep newest)."""
         lines = lines[-_DEADLETTER_MAX:]
         total = sum(len(l.encode("utf-8")) + 1 for l in lines)
-        while len(lines) > 1 and total > _DEADLETTER_TRIM_BYTES:
+        # trim to 3/4 of the trigger threshold — without hysteresis every
+        # append at saturation rewrites the whole file
+        target = _DEADLETTER_TRIM_BYTES * 3 // 4
+        while len(lines) > 1 and total > target:
             total -= len(lines.pop(0).encode("utf-8")) + 1
         return lines
 
-    def _deadletter_append(self, user_content: str, assistant_content: str) -> bool:
-        """Queue a turn whose sync was dropped; True if durably queued."""
+    @staticmethod
+    def _turn_messages(user_content: str, assistant_content: str) -> list:
+        return [
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": assistant_content},
+        ]
+
+    def _deadletter_append(self, user_content: str, assistant_content: str,
+                           ts: float = 0.0) -> bool:
+        """Queue a turn whose sync was dropped; True if durably queued.
+
+        ``ts`` is the TURN timestamp (stamped when sync_turn was called, in
+        conversation order) — queue-time would invert replay order when a
+        hung-then-failed sync appends an older turn after a busy-skipped
+        newer one, regressing corrected facts.
+        """
         queued = False
         try:
             entry = json.dumps({
-                "ts": time.time(),
-                "messages": [
-                    {"role": "user", "content": user_content},
-                    {"role": "assistant", "content": assistant_content},
-                ],
+                "ts": ts or time.time(),
+                "messages": self._turn_messages(user_content, assistant_content),
                 "user_id": self._user_id,
                 "agent_id": self._agent_id,
                 "metadata": self._write_metadata(),
@@ -698,8 +723,11 @@ class Mem0MemoryProvider(MemoryProvider):
                             metadata=entry.get("metadata") or {},
                         )
                     except Exception as e:
-                        if self._shutting_down:
-                            return  # closed-backend failure is not an attempt
+                        # A failure against a closed/replaced backend (shutdown,
+                        # or re-init swapping self._backend under a hung drain)
+                        # is not a replay attempt.
+                        if self._shutting_down or backend is not self._backend:
+                            return
                         attempts = (entry.get("attempts") or 0) + 1
                         if attempts >= _DEADLETTER_MAX_ATTEMPTS:
                             logger.warning(
@@ -758,23 +786,20 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Send the turn to Mem0 for server-side fact extraction (non-blocking)."""
+        turn_ts = time.time()  # conversation-order stamp for any queued copy
         if self._backend is None or self._is_breaker_open():
             # Backend down or breaker open: queue instead of losing the turn.
-            self._deadletter_append(user_content, assistant_content)
+            self._deadletter_append(user_content, assistant_content, ts=turn_ts)
             return
 
         def _sync():
             backend = self._backend
             if backend is None:
-                self._deadletter_append(user_content, assistant_content)
+                self._deadletter_append(user_content, assistant_content, ts=turn_ts)
                 return
             try:
-                messages = [
-                    {"role": "user", "content": user_content},
-                    {"role": "assistant", "content": assistant_content},
-                ]
                 backend.add(
-                    messages,
+                    self._turn_messages(user_content, assistant_content),
                     user_id=self._user_id,
                     agent_id=self._agent_id,
                     infer=True,
@@ -783,7 +808,7 @@ class Mem0MemoryProvider(MemoryProvider):
                 self._record_success()
             except Exception as e:
                 self._record_failure()
-                if self._deadletter_append(user_content, assistant_content):
+                if self._deadletter_append(user_content, assistant_content, ts=turn_ts):
                     logger.warning("Mem0 sync failed (turn queued for replay): %s", e)
                 else:
                     logger.warning("Mem0 sync failed and turn could not be queued: %s", e)
@@ -797,7 +822,7 @@ class Mem0MemoryProvider(MemoryProvider):
             # skipped outright "to avoid duplicate ingestion" — i.e. dropped);
             # the in-flight sync's replay pass will pick it up.
             if self._sync_thread and self._sync_thread.is_alive():
-                self._deadletter_append(user_content, assistant_content)
+                self._deadletter_append(user_content, assistant_content, ts=turn_ts)
                 return
             self._sync_thread = threading.Thread(target=_sync, daemon=True, name="mem0-sync")
             self._sync_thread.start()
