@@ -33,9 +33,12 @@ def _provider(tmp_path, monkeypatch, backend):
 
 def _sync_and_join(p, user, asst):
     p.sync_turn(user, asst)
-    t = p._sync_thread
-    if t:
-        t.join(timeout=10)
+    # join the sync worker first — it may start the replay thread on success,
+    # so _replay_thread must be re-read AFTER the sync join
+    if p._sync_thread:
+        p._sync_thread.join(timeout=10)
+    if p._replay_thread:
+        p._replay_thread.join(timeout=10)
 
 
 def _deadletter(tmp_path):
@@ -133,26 +136,6 @@ def test_truncated_utf8_does_not_wedge_replay(tmp_path, monkeypatch):
     assert contents == ["live", "good"]
 
 
-def test_permanently_rejected_entry_is_dropped(tmp_path, monkeypatch):
-    class ValidationError(Exception):
-        pass
-
-    class PoisonBackend(FakeBackend):
-        def add(self, messages, **kwargs):
-            if messages[0]["content"] == "poison":
-                raise ValidationError("bad content")
-            return super().add(messages, **kwargs)
-
-    backend = PoisonBackend()
-    p = _provider(tmp_path, monkeypatch, backend)
-    p._deadletter_append("poison", "x")
-    p._deadletter_append("good", "y")
-    _sync_and_join(p, "live", "a")
-    contents = [m[0]["content"] for m in backend.added]
-    assert contents == ["live", "good"]
-    assert _drained(tmp_path)
-
-
 def test_replay_is_oldest_first_by_ts(tmp_path, monkeypatch):
     backend = FakeBackend()
     p = _provider(tmp_path, monkeypatch, backend)
@@ -172,19 +155,69 @@ def test_remove_failure_does_not_kill_sync_worker(tmp_path, monkeypatch):
     p = _provider(tmp_path, monkeypatch, backend)
     p._deadletter_append("queued", "x")
 
-    def boom(remove, add=()):
+    def boom(remove=(), replace=None):
         raise OSError("disk full")
 
     # plain instance-attribute shadow — NOT monkeypatch.setattr, whose undo()
     # would also revert the HERMES_HOME redirect and touch the real queue
     p._deadletter_mutate = boom
     _sync_and_join(p, "live1", "a")
-    # replay errored but the worker survived; next sync still works
+    # replay errored but the workers survived; next sync still works
     del p._deadletter_mutate
     _sync_and_join(p, "live2", "a")
     contents = [m[0]["content"] for m in backend.added]
     assert contents[0] == "live1"
     assert "live2" in contents
+
+
+def test_transient_404_flap_is_not_dropped(tmp_path, monkeypatch):
+    class FlakyBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.flap = True
+
+        def add(self, messages, **kwargs):
+            if messages[0]["content"] == "queued" and self.flap:
+                self.flap = False
+                raise ConnectionError(
+                    "Unexpected Response: 404 (Not Found) — collection recovering")
+            return super().add(messages, **kwargs)
+
+    backend = FlakyBackend()
+    p = _provider(tmp_path, monkeypatch, backend)
+    p._deadletter_append("queued", "x")
+    _sync_and_join(p, "live1", "a")  # replay hits the 404-shaped flap
+    # entry must still be queued (attempts=1), not dropped on sight
+    lines = _deadletter(tmp_path).read_text().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["attempts"] == 1
+    _sync_and_join(p, "live2", "a")  # flap over — replays fine
+    contents = [m[0]["content"] for m in backend.added]
+    assert "queued" in contents
+    assert _drained(tmp_path)
+
+
+def test_attempts_bump_preserves_file_position(tmp_path, monkeypatch):
+    backend = FakeBackend(fail=False)
+
+    class HeadFails(FakeBackend):
+        def add(self, messages, **kwargs):
+            if messages[0]["content"] == "older":
+                raise ConnectionError("flaky")
+            return super().add(messages, **kwargs)
+
+    p = _provider(tmp_path, monkeypatch, HeadFails())
+    path = _deadletter(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        f.write(json.dumps({"ts": 10, "messages": [{"role": "user", "content": "older"}, {"role": "assistant", "content": "a"}]}) + "\n")
+        f.write(json.dumps({"ts": 20, "messages": [{"role": "user", "content": "newer"}, {"role": "assistant", "content": "a"}]}) + "\n")
+    _sync_and_join(p, "live", "a")
+    lines = path.read_text().splitlines()
+    # the failing head entry is updated in place, not re-appended at the tail
+    assert json.loads(lines[0])["messages"][0]["content"] == "older"
+    assert json.loads(lines[0])["attempts"] == 1
+    assert json.loads(lines[1])["messages"][0]["content"] == "newer"
 
 
 def test_unclassified_permanent_error_dropped_after_max_attempts(tmp_path, monkeypatch):
