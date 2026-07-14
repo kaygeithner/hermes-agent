@@ -83,13 +83,14 @@ def test_breaker_open_turn_is_queued_not_dropped(tmp_path, monkeypatch):
 
 def test_deadletter_is_bounded(tmp_path, monkeypatch):
     import plugins.memory.mem0 as mem0_mod
-    monkeypatch.setattr(mem0_mod, "_DEADLETTER_TRIM_BYTES", 1)  # trim on every append
+    monkeypatch.setattr(mem0_mod, "_DEADLETTER_TRIM_BYTES", 5000)
     p = _provider(tmp_path, monkeypatch, FakeBackend())
     for i in range(_DEADLETTER_MAX + 20):
         p._deadletter_append(f"u{i}", "a")
     lines = _deadletter(tmp_path).read_text().splitlines()
-    assert len(lines) == _DEADLETTER_MAX
-    # oldest dropped, newest kept
+    # bounded by count AND bytes; oldest dropped, newest kept
+    assert 0 < len(lines) <= _DEADLETTER_MAX
+    assert _deadletter(tmp_path).stat().st_size <= 5000 + 300  # one-entry slack
     assert json.loads(lines[-1])["messages"][0]["content"] == f"u{_DEADLETTER_MAX + 19}"
 
 
@@ -166,18 +167,61 @@ def test_replay_is_oldest_first_by_ts(tmp_path, monkeypatch):
     assert contents == ["live", "older", "newer"]
 
 
-def test_pop_failure_does_not_kill_sync_worker(tmp_path, monkeypatch):
+def test_remove_failure_does_not_kill_sync_worker(tmp_path, monkeypatch):
     backend = FakeBackend()
     p = _provider(tmp_path, monkeypatch, backend)
     p._deadletter_append("queued", "x")
-    monkeypatch.setattr(p, "_deadletter_pop", lambda line: (_ for _ in ()).throw(OSError("disk full")))
+
+    def boom(remove, add=()):
+        raise OSError("disk full")
+
+    # plain instance-attribute shadow — NOT monkeypatch.setattr, whose undo()
+    # would also revert the HERMES_HOME redirect and touch the real queue
+    p._deadletter_mutate = boom
     _sync_and_join(p, "live1", "a")
     # replay errored but the worker survived; next sync still works
-    monkeypatch.undo()
+    del p._deadletter_mutate
     _sync_and_join(p, "live2", "a")
     contents = [m[0]["content"] for m in backend.added]
     assert contents[0] == "live1"
     assert "live2" in contents
+
+
+def test_unclassified_permanent_error_dropped_after_max_attempts(tmp_path, monkeypatch):
+    from plugins.memory.mem0 import _DEADLETTER_MAX_ATTEMPTS
+
+    class PayloadTooLarge(Exception):  # not matched by _is_client_error
+        pass
+
+    class PoisonBackend(FakeBackend):
+        def add(self, messages, **kwargs):
+            if messages[0]["content"] == "poison":
+                raise PayloadTooLarge("413 request entity too large")
+            return super().add(messages, **kwargs)
+
+    backend = PoisonBackend()
+    p = _provider(tmp_path, monkeypatch, backend)
+    p._deadletter_append("poison", "x")
+    p._deadletter_append("good", "y")
+    for i in range(_DEADLETTER_MAX_ATTEMPTS):
+        _sync_and_join(p, f"live{i}", "a")
+    contents = [m[0]["content"] for m in backend.added]
+    assert "good" in contents  # drained once the poison entry hit the cap
+    assert "poison" not in contents
+    assert _drained(tmp_path)
+
+
+def test_append_after_truncated_tail_does_not_merge(tmp_path, monkeypatch):
+    backend = FakeBackend()
+    p = _provider(tmp_path, monkeypatch, backend)
+    path = _deadletter(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # crash mid-append: partial line, no trailing newline
+    path.write_bytes(b'{"ts": 1, "messages": [{"role": "user", "content": "partial')
+    p._deadletter_append("good", "turn")
+    _sync_and_join(p, "live", "a")
+    contents = [m[0]["content"] for m in backend.added]
+    assert contents == ["live", "good"]
 
 
 def test_append_failure_reports_not_queued(tmp_path, monkeypatch):
