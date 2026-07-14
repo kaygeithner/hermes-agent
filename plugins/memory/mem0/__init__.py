@@ -66,6 +66,10 @@ _DEADLETTER_TRIM_BYTES = 2_000_000
 # (the current sync succeeded) is presumed poisoned and dropped after this
 # many attempts — catches permanent rejections _is_client_error can't name.
 _DEADLETTER_MAX_ATTEMPTS = 8
+# Replayed entries older than this get a date annotation prepended to the
+# user message so mem0's extraction doesn't regress newer facts to stale
+# ones (an outage drain replays old turns AFTER newer live syncs).
+_DEADLETTER_ANNOTATE_AGE_SECS = 600
 
 # Sentinel returned when neither MEM0_USER_ID nor a gateway-native id is
 # available. Treated as "no operator-configured user_id" by initialize() so
@@ -226,6 +230,10 @@ class Mem0MemoryProvider(MemoryProvider):
         self._prefetch_result = ""
         self._prefetch_done = False
         self._replay_thread = None
+        self._shutting_down = False
+        # Entries backend.add already ingested whose file removal failed
+        # (e.g. ENOSPC) — skipped on later passes so they aren't re-added.
+        self._replayed_pending = set()
         # Circuit breaker state
         self._consecutive_failures = 0
         self._breaker_open_until = 0.0
@@ -599,8 +607,8 @@ class Mem0MemoryProvider(MemoryProvider):
             with MemoryStore._file_lock(path):
                 try:
                     raw = path.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    return
+                except FileNotFoundError:
+                    return  # nothing to mutate; other read/write errors raise
                 lines = self._split_entries(raw)
                 for old, new in (replace or {}).items():
                     if old in lines:
@@ -620,6 +628,12 @@ class Mem0MemoryProvider(MemoryProvider):
         lock. Concurrent backend use is already the norm here (prefetch
         searches while syncs add).
         """
+        # No drain during shutdown: the backend is about to close, and a
+        # failure against a closed backend must not count as a replay
+        # attempt. Short-lived (oneshot/cron) processes therefore never
+        # drain — the long-lived gateway sharing the same HERMES_HOME does.
+        if self._shutting_down:
+            return
         try:
             path = self._deadletter_path()
             # unlocked fast path: healthy installs that never queued a turn
@@ -634,7 +648,11 @@ class Mem0MemoryProvider(MemoryProvider):
 
         def _drain():
             try:
-                self._deadletter_replay(backend)
+                # Cross-process drain lock: two processes sharing HERMES_HOME
+                # (gateway + cron oneshot) must not replay the same snapshot
+                # twice. The second blocks, then finds the file drained.
+                with MemoryStore._file_lock(path.with_suffix(".drain")):
+                    self._deadletter_replay(backend)
             except Exception as e:
                 logger.warning("Mem0 dead-letter replay error: %s", e)
 
@@ -678,36 +696,73 @@ class Mem0MemoryProvider(MemoryProvider):
             if not entries:
                 return
             entries.sort(key=lambda t: t[0])
-            for _, line, entry, messages in entries:
-                try:
-                    backend.add(
-                        messages,
-                        user_id=entry.get("user_id") or self._user_id,
-                        agent_id=entry.get("agent_id") or self._agent_id,
-                        infer=True,
-                        metadata=entry.get("metadata") or {},
-                    )
-                except Exception as e:
-                    attempts = (entry.get("attempts") or 0) + 1
-                    if attempts >= _DEADLETTER_MAX_ATTEMPTS:
-                        logger.warning(
-                            "Mem0 dead-letter entry failed %d replay attempts — dropping it: %s",
-                            attempts, e)
-                        self._deadletter_mutate(remove=[line])
-                        continue
-                    # ponytail: attempts can tick up on the oldest entry during
-                    # a flaky-backend window (sync succeeded, replay add failed)
-                    # — 8 healthy-sync failures before calling one turn poisoned
-                    # is the accepted ceiling
-                    entry["attempts"] = attempts
-                    self._deadletter_mutate(
-                        replace={line: json.dumps(entry, ensure_ascii=False)})
-                    logger.warning(
-                        "Mem0 dead-letter replay paused (%d turns queued, attempt %d): %s",
-                        len(entries), attempts, e,
-                    )
+            for ts, line, entry, messages in entries:
+                if self._shutting_down:
                     return
-                self._deadletter_mutate(remove=[line])
+                if line not in self._replayed_pending:
+                    try:
+                        backend.add(
+                            self._annotate_stale(messages, ts),
+                            user_id=entry.get("user_id") or self._user_id,
+                            agent_id=entry.get("agent_id") or self._agent_id,
+                            infer=True,
+                            metadata=entry.get("metadata") or {},
+                        )
+                    except Exception as e:
+                        if self._shutting_down:
+                            return  # closed-backend failure is not an attempt
+                        attempts = (entry.get("attempts") or 0) + 1
+                        if attempts >= _DEADLETTER_MAX_ATTEMPTS:
+                            logger.warning(
+                                "Mem0 dead-letter entry failed %d replay attempts — dropping it: %s",
+                                attempts, e)
+                            self._deadletter_mutate(remove=[line])
+                            continue
+                        # ponytail: attempts can tick up on the oldest entry
+                        # during a flaky-backend window (sync succeeded, replay
+                        # add failed) — 8 healthy-sync failures before calling
+                        # one turn poisoned is the accepted ceiling
+                        entry["attempts"] = attempts
+                        self._deadletter_mutate(
+                            replace={line: json.dumps(entry, ensure_ascii=False)})
+                        logger.warning(
+                            "Mem0 dead-letter replay paused (%d turns queued, attempt %d): %s",
+                            len(entries), attempts, e,
+                        )
+                        return
+                try:
+                    self._deadletter_mutate(remove=[line])
+                except Exception as e:
+                    # The add went through but the removal rewrite failed
+                    # (ENOSPC): remember in-process so later passes don't
+                    # re-ingest the same turn once per sync.
+                    self._replayed_pending.add(line)
+                    logger.warning(
+                        "Mem0 dead-letter removal failed — entry marked replayed in-memory: %s", e)
+                    return
+                self._replayed_pending.discard(line)
+
+    @staticmethod
+    def _annotate_stale(messages: list, ts: float) -> list:
+        """Prefix stale replays with their original date for the extractor.
+
+        A drain replays old turns AFTER newer live syncs; without a temporal
+        hint mem0's LLM update can regress a fresh fact to the stale one.
+        Fresh replays (busy-skip, seconds old) pass through byte-identical.
+        """
+        # ponytail: content annotation because OSS Memory.add rejects the
+        # timestamp param (platform-only); switch to timestamp= if OSS mem0
+        # ever supports it or the annotation proves too weak
+        age = time.time() - ts if ts else 0
+        if age <= _DEADLETTER_ANNOTATE_AGE_SECS or not messages:
+            return messages
+        head = messages[0]
+        if not isinstance(head.get("content"), str):
+            return messages
+        stamp = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ts))
+        note = (f"[Note: exchange restored from an offline queue; it originally "
+                f"happened at {stamp} — newer memories may supersede it.]\n")
+        return [{**head, "content": note + head["content"]}, *messages[1:]]
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Send the turn to Mem0 for server-side fact extraction (non-blocking)."""
@@ -866,9 +921,18 @@ class Mem0MemoryProvider(MemoryProvider):
         # abandons the final turn's write in short-lived (oneshot/cron)
         # processes — the exact loss the session-boundary shutdown exists to
         # prevent. Only waits while a sync is actually in flight.
-        for t in (self._prefetch_thread, self._sync_thread, self._replay_thread):
+        # Stop the drain between entries and make sure a post-shutdown add
+        # failure is never counted as a replay attempt.
+        self._shutting_down = True
+        for t in (self._prefetch_thread, self._sync_thread):
             if t and t.is_alive():
                 t.join(timeout=30.0)
+        # Re-read AFTER the sync join: a drain the final sync spawned (or one
+        # already running) exits at its next between-entries check, so this
+        # join is bounded by one in-flight add, not the whole backlog.
+        t = self._replay_thread
+        if t and t.is_alive():
+            t.join(timeout=30.0)
         self._shutdown_backend()
 
 
