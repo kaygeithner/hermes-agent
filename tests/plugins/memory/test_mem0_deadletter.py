@@ -1,4 +1,4 @@
-"""Tests for the mem0 dead-letter queue and first-turn prefetch."""
+"""Tests for the mem0 dead-letter queue and current-turn prefetch."""
 
 import json
 import time
@@ -296,13 +296,13 @@ def test_append_failure_reports_not_queued(tmp_path, monkeypatch):
     assert p._deadletter_append("u", "a") is False
 
 
-def test_first_turn_prefetch(tmp_path, monkeypatch):
+def test_current_turn_prefetch(tmp_path, monkeypatch):
     backend = FakeBackend()
     backend.search_results = [{"memory": "Kay likes tea"}]
     p = _provider(tmp_path, monkeypatch, backend)
     p.on_turn_start(1, "hello")
-    out = p.prefetch("hello")
-    assert "Kay likes tea" in out
-    # seeded flag: later turns don't re-queue from on_turn_start
+    assert "Kay likes tea" in p.prefetch("hello")
+
+    backend.search_results = [{"memory": "Kay likes coffee"}]
     p.on_turn_start(2, "more")
-    assert p.prefetch("more") == ""
+    assert "Kay likes coffee" in p.prefetch("more")

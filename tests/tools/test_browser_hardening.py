@@ -208,12 +208,72 @@ class TestTruncateSnapshot:
         assert len(snapshot) > SNAPSHOT_SUMMARIZE_THRESHOLD
 
         result = _truncate_snapshot(snapshot, max_chars=200)
-        assert "truncated" in result.lower()
+        assert len(result) <= 300  # some margin for the truncation note
+        assert "omitted from the middle" in result.lower()
         # Every line in the result should be complete (not cut mid-element)
         for line in result.split("\n"):
-            if line.strip() and "truncated" not in line.lower():
+            if line.strip() and "omitted from the middle" not in line.lower():
                 assert line.startswith("- item") or line == ""
 
+    def test_truncation_reports_remaining_count_and_keeps_tail(self):
+        from tools.browser_tool import _truncate_snapshot
+        lines = [f"- line {i}" for i in range(100)]
+        snapshot = "\n".join(lines)
+        result = _truncate_snapshot(snapshot, max_chars=200)
+        assert "lines omitted" in result.lower()
+        assert lines[-1] in result
+
+
+class TestBrowserFrame:
+
+    @pytest.mark.parametrize(("target", "expected"), [("e2", "@e2"), ("main", "main")])
+    def test_routes_normalized_target(self, target, expected):
+        import tools.browser_tool as bt
+        with (
+            patch.object(bt, "_is_camofox_mode", return_value=False),
+            patch.object(bt, "_last_session_key", return_value="session"),
+            patch.object(bt, "_run_browser_command", return_value={"success": True}) as run,
+        ):
+            result = bt.browser_frame(target)
+
+        run.assert_called_once_with("session", "frame", [expected])
+        assert '"success": true' in result
+
+    def test_threshold_aligned_with_web_extract_budget(self):
+        """Snapshot and web_extract share the truncate-and-store pattern —
+        the per-page budget the model sees must stay aligned between them."""
+        from tools.browser_tool import SNAPSHOT_SUMMARIZE_THRESHOLD
+        from tools.web_tools import DEFAULT_EXTRACT_CHAR_LIMIT
+        assert SNAPSHOT_SUMMARIZE_THRESHOLD == DEFAULT_EXTRACT_CHAR_LIMIT
+
+    def test_truncation_stores_full_snapshot_and_points_to_it(self):
+        """Truncated snapshots save the complete text to cache/web (like web_extract)."""
+        from pathlib import Path
+        from tools.browser_tool import _truncate_snapshot
+
+        lines = [f'- item "Element {i}" [ref=e{i}]' for i in range(500)]
+        snapshot = "\n".join(lines)
+        result = _truncate_snapshot(snapshot, max_chars=2000)
+
+        assert "read_file" in result
+        m = re.search(r'read_file path="([^"]+)"', result)
+        assert m, f"no stored-path pointer in truncation note: {result[-300:]}"
+        stored = Path(m.group(1))
+        assert stored.exists()
+        content = stored.read_text(encoding="utf-8")
+        # The full snapshot is in the file — including refs beyond the cut.
+        assert '[ref=e499]' in content
+
+    def test_truncation_survives_storage_failure(self):
+        """Storage is best-effort; the truncated view still returns."""
+        from tools.browser_tool import _truncate_snapshot
+
+        lines = [f"- line {i}" for i in range(100)]
+        snapshot = "\n".join(lines)
+        with patch("tools.browser_tool._store_full_snapshot", return_value=None):
+            result = _truncate_snapshot(snapshot, max_chars=200)
+        assert "truncated" in result.lower()
+        assert "read_file" not in result
 
     def test_stored_snapshot_is_secret_redacted(self):
         """Page-rendered secrets must not land unmasked on disk."""
