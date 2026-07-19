@@ -1,6 +1,7 @@
 """Tests for the mem0 dead-letter queue and current-turn prefetch."""
 
 import json
+import threading
 import time
 
 from plugins.memory.mem0 import Mem0MemoryProvider, _DEADLETTER_MAX
@@ -53,7 +54,9 @@ def _drained(tmp_path):
 def test_failed_sync_lands_in_deadletter(tmp_path, monkeypatch):
     p = _provider(tmp_path, monkeypatch, FakeBackend(fail=True))
     _sync_and_join(p, "hello", "world")
-    lines = _deadletter(tmp_path).read_text().splitlines()
+    path = _deadletter(tmp_path)
+    lines = path.read_text().splitlines()
+    assert path.stat().st_mode & 0o777 == 0o600
     assert len(lines) == 1
     entry = json.loads(lines[0])
     assert entry["messages"][0]["content"] == "hello"
@@ -92,6 +95,7 @@ def test_deadletter_is_bounded(tmp_path, monkeypatch):
         p._deadletter_append(f"u{i}", "a")
     lines = _deadletter(tmp_path).read_text().splitlines()
     # bounded by count AND bytes; oldest dropped, newest kept
+    assert _deadletter(tmp_path).stat().st_mode & 0o777 == 0o600
     assert 0 < len(lines) <= _DEADLETTER_MAX
     assert _deadletter(tmp_path).stat().st_size <= 5000 + 300  # one-entry slack
     assert json.loads(lines[-1])["messages"][0]["content"] == f"u{_DEADLETTER_MAX + 19}"
@@ -306,3 +310,42 @@ def test_current_turn_prefetch(tmp_path, monkeypatch):
     backend.search_results = [{"memory": "Kay likes coffee"}]
     p.on_turn_start(2, "more")
     assert "Kay likes coffee" in p.prefetch("more")
+
+
+def test_sync_turn_accepts_v0182_message_context(tmp_path, monkeypatch):
+    p = _provider(tmp_path, monkeypatch, FakeBackend())
+    p.sync_turn("hello", "world", messages=[{"role": "user", "content": "hello"}])
+    assert p._sync_thread is not None
+    p._sync_thread.join(timeout=10)
+    assert not p._sync_thread.is_alive()
+
+
+def test_reinitialize_discards_late_prefetch_result(tmp_path, monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingBackend(FakeBackend):
+        def search(self, query, *, filters, top_k=10, rerank=True):
+            started.set()
+            assert release.wait(timeout=5)
+            return [{"memory": "stale result"}]
+
+    p = _provider(tmp_path, monkeypatch, BlockingBackend())
+    p._atexit_registered = True
+    p._start_prefetch("same query")
+    old_thread = p._prefetch_thread
+    assert old_thread is not None
+    assert started.wait(timeout=5)
+
+    monkeypatch.setattr(
+        "plugins.memory.mem0._load_config",
+        lambda: {"mode": "oss", "oss": {}, "user_id": "kay"},
+    )
+    monkeypatch.setattr(p, "_create_backend", FakeBackend)
+    p.initialize("new-session", hermes_home=str(tmp_path))
+    release.set()
+    old_thread.join(timeout=5)
+
+    assert not old_thread.is_alive()
+    assert p._prefetch_result == ""
+    assert p._prefetch_done is False

@@ -555,6 +555,7 @@ class Mem0MemoryProvider(MemoryProvider):
         """
         tmp = path.with_suffix(".jsonl.tmp")
         with tmp.open("w", encoding="utf-8", newline="\n") as f:
+            os.fchmod(f.fileno(), 0o600)
             f.write(("\n".join(lines) + "\n") if lines else "")
             f.flush()
             os.fsync(f.fileno())
@@ -611,6 +612,7 @@ class Mem0MemoryProvider(MemoryProvider):
                     except (OSError, ValueError):
                         pass  # missing or empty file
                     with path.open("a", encoding="utf-8", newline="\n") as f:
+                        os.fchmod(f.fileno(), 0o600)
                         if needs_nl:
                             f.write("\n")
                         f.write(entry + "\n")
@@ -853,7 +855,8 @@ class Mem0MemoryProvider(MemoryProvider):
                 f"happened at {stamp} — newer memories may supersede it.]\n")
         return [{**head, "content": note + head["content"]}, *messages[1:]]
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    def sync_turn(self, user_content: str, assistant_content: str, *,
+                  session_id: str = "", messages=None) -> None:
         """Send the turn to Mem0 for server-side fact extraction (non-blocking)."""
         turn_ts = time.time()  # conversation-order stamp for any queued copy
         if self._backend is None or self._is_breaker_open():
