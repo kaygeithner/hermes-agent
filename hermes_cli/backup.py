@@ -290,6 +290,13 @@ def _format_size(nbytes: int) -> str:
     return f"{nbytes:.1f} TB"
 
 
+def _open_backup_zip(path: Path) -> zipfile.ZipFile:
+    mode = os.getenv("HERMES_BACKUP_COMPRESSION", "deflated").strip().lower()
+    compression = zipfile.ZIP_STORED if mode in {"0", "store", "stored", "none"} else zipfile.ZIP_DEFLATED
+    compresslevel = None if compression == zipfile.ZIP_STORED else 6
+    return zipfile.ZipFile(path, "w", compression=compression, compresslevel=compresslevel)
+
+
 def run_backup(args) -> None:
     """Create a zip backup of the Hermes home directory."""
     hermes_root = get_default_hermes_root()
@@ -382,11 +389,7 @@ def run_backup(args) -> None:
     errors = []
     t0 = time.monotonic()
 
-    compression_mode = os.getenv("HERMES_BACKUP_COMPRESSION", "deflated").strip().lower()
-    zip_compression = zipfile.ZIP_STORED if compression_mode in {"0", "store", "stored", "none"} else zipfile.ZIP_DEFLATED
-    zip_compresslevel = None if zip_compression == zipfile.ZIP_STORED else 6
-
-    with zipfile.ZipFile(out_path, "w", compression=zip_compression, compresslevel=zip_compresslevel) as zf:
+    with _open_backup_zip(out_path) as zf:
         for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
             try:
                 # Safe copy for SQLite databases (handles WAL mode)
@@ -1183,7 +1186,7 @@ def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
         return None
 
     try:
-        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        with _open_backup_zip(out_path) as zf:
             for abs_path, rel_path in files_to_add:
                 try:
                     if abs_path.suffix == ".db":

@@ -234,12 +234,15 @@ class TestBackup:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         out_zip = tmp_path / "backup.zip"
-        from hermes_cli.backup import run_backup
+        pre_update_zip = tmp_path / "pre-update.zip"
+        from hermes_cli.backup import _write_full_zip_backup, run_backup
         run_backup(Namespace(output=str(out_zip)))
+        assert _write_full_zip_backup(pre_update_zip, hermes_home) == pre_update_zip
 
-        with zipfile.ZipFile(out_zip) as zf:
-            assert zf.infolist()
-            assert all(info.compress_type == zipfile.ZIP_STORED for info in zf.infolist())
+        for path in (out_zip, pre_update_zip):
+            with zipfile.ZipFile(path) as zf:
+                assert zf.infolist()
+                assert all(info.compress_type == zipfile.ZIP_STORED for info in zf.infolist())
 
     def test_db_snapshots_staged_beside_output_zip(self, tmp_path, monkeypatch):
         """SQLite staging temp files must be created on the output zip's

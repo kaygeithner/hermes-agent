@@ -425,10 +425,11 @@ def _run_agent(
         # (mem0 add → extraction/embedding/upsert): the write is lost every
         # time, and interpreter teardown intermittently segfaults under the
         # still-running native client thread (observed as rc=139 after the
-        # answer was already printed).  Both calls are bounded (5s drain +
-        # 5s thread joins) and internally guarded.
+        # answer was already printed). Both calls are bounded by provider
+        # shutdown timeouts and internally guarded.
         try:
-            agent.shutdown_memory_provider()
+            messages = getattr(agent, "_session_messages", None)
+            agent.shutdown_memory_provider(messages if isinstance(messages, list) else [])
         except Exception:
             pass
         try:

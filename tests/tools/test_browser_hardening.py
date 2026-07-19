@@ -249,6 +249,11 @@ class TestTruncateSnapshot:
 
 class TestBrowserFrame:
 
+    def test_is_exposed_by_default_and_browser_toolsets(self):
+        from toolsets import TOOLSETS, _HERMES_CORE_TOOLS
+        assert "browser_frame" in _HERMES_CORE_TOOLS
+        assert "browser_frame" in TOOLSETS["browser"]["tools"]
+
     @pytest.mark.parametrize(("target", "expected"), [("e2", "@e2"), ("main", "main")])
     def test_routes_normalized_target(self, target, expected):
         import tools.browser_tool as bt
