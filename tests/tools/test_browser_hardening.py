@@ -232,19 +232,35 @@ class TestTruncateSnapshot:
 
         result = _truncate_snapshot(snapshot, max_chars=200)
         assert len(result) <= 300  # some margin for the truncation note
-        assert "truncated" in result.lower()
+        assert "omitted from the middle" in result.lower()
         # Every line in the result should be complete (not cut mid-element)
         for line in result.split("\n"):
-            if line.strip() and "truncated" not in line.lower():
+            if line.strip() and "omitted from the middle" not in line.lower():
                 assert line.startswith("- item") or line == ""
 
-    def test_truncation_reports_remaining_count(self):
+    def test_truncation_reports_remaining_count_and_keeps_tail(self):
         from tools.browser_tool import _truncate_snapshot
         lines = [f"- line {i}" for i in range(100)]
         snapshot = "\n".join(lines)
         result = _truncate_snapshot(snapshot, max_chars=200)
-        # Should mention how many lines were truncated
-        assert "more line" in result.lower()
+        assert "lines omitted" in result.lower()
+        assert lines[-1] in result
+
+
+class TestBrowserFrame:
+
+    @pytest.mark.parametrize(("target", "expected"), [("e2", "@e2"), ("main", "main")])
+    def test_routes_normalized_target(self, target, expected):
+        import tools.browser_tool as bt
+        with (
+            patch.object(bt, "_is_camofox_mode", return_value=False),
+            patch.object(bt, "_last_session_key", return_value="session"),
+            patch.object(bt, "_run_browser_command", return_value={"success": True}) as run,
+        ):
+            result = bt.browser_frame(target)
+
+        run.assert_called_once_with("session", "frame", [expected])
+        assert '"success": true' in result
 
 
 # ---------------------------------------------------------------------------

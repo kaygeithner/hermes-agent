@@ -61,6 +61,7 @@ _EXCLUDED_DIRS = {
     "site-packages",
     # Tool / build caches — all regeneratable.
     ".cache",
+    "browser-profiles",  # live browser SQLite stores can stay locked for minutes; re-auth beats wedged backups
     ".tox",
     ".nox",
     ".pytest_cache",
@@ -381,7 +382,11 @@ def run_backup(args) -> None:
     errors = []
     t0 = time.monotonic()
 
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+    compression_mode = os.getenv("HERMES_BACKUP_COMPRESSION", "deflated").strip().lower()
+    zip_compression = zipfile.ZIP_STORED if compression_mode in {"0", "store", "stored", "none"} else zipfile.ZIP_DEFLATED
+    zip_compresslevel = None if zip_compression == zipfile.ZIP_STORED else 6
+
+    with zipfile.ZipFile(out_path, "w", compression=zip_compression, compresslevel=zip_compresslevel) as zf:
         for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
             try:
                 # Safe copy for SQLite databases (handles WAL mode)

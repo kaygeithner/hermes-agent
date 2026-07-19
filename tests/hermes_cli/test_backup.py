@@ -225,6 +225,22 @@ class TestBackup:
             # Skins
             assert "skins/cyber.yaml" in names
 
+    def test_stored_compression_mode(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HERMES_BACKUP_COMPRESSION", "stored")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_zip = tmp_path / "backup.zip"
+        from hermes_cli.backup import run_backup
+        run_backup(Namespace(output=str(out_zip)))
+
+        with zipfile.ZipFile(out_zip) as zf:
+            assert zf.infolist()
+            assert all(info.compress_type == zipfile.ZIP_STORED for info in zf.infolist())
+
     def test_db_snapshots_staged_beside_output_zip(self, tmp_path, monkeypatch):
         """SQLite staging temp files must be created on the output zip's
         filesystem (dir=out_path.parent), NOT the system /tmp default — a
@@ -320,6 +336,9 @@ class TestBackup:
         pip_cache = hermes_home / ".cache" / "uv" / "wheels"
         pip_cache.mkdir(parents=True)
         (pip_cache / "abc.whl").write_bytes(b"\x00")
+        browser_profile = hermes_home / "browser-profiles" / "Default"
+        browser_profile.mkdir(parents=True)
+        (browser_profile / "Cookies").write_bytes(b"locked sqlite")
 
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -330,7 +349,10 @@ class TestBackup:
 
         with zipfile.ZipFile(out_zip, "r") as zf:
             names = zf.namelist()
-        leaked = [n for n in names if ".venv" in n or "site-packages" in n or ".cache" in n]
+        leaked = [
+            n for n in names
+            if ".venv" in n or "site-packages" in n or ".cache" in n or "browser-profiles" in n
+        ]
         assert leaked == [], f"regeneratable trees leaked into backup: {leaked}"
         # Real data still present.
         assert "skills/my-skill/SKILL.md" in names
