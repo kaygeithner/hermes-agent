@@ -491,6 +491,7 @@ class Mem0MemoryProvider(MemoryProvider):
 
         def _run():
             body = ""
+            failure = None
             try:
                 results = backend.search(
                     query, filters=self._read_filters(), top_k=10, rerank=False,
@@ -498,12 +499,17 @@ class Mem0MemoryProvider(MemoryProvider):
                 lines = [r.get("memory", "") for r in (results or []) if r.get("memory")]
                 if lines:
                     body = "## Mem0 Memory\n" + "\n".join(f"- {l}" for l in lines)
-                self._record_success()
             except Exception as e:
-                self._record_failure()
+                failure = e
                 logger.debug("Mem0 prefetch failed: %s", e)
             with self._prefetch_lock:
-                if gen == self._prefetch_gen and self._prefetch_query == query:
+                if gen != self._prefetch_gen:
+                    return
+                if failure is None:
+                    self._record_success()
+                else:
+                    self._record_failure()
+                if self._prefetch_query == query:
                     self._prefetch_result = body
                     self._prefetch_done = True
 

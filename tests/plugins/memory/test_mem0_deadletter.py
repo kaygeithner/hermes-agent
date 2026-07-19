@@ -332,6 +332,7 @@ def test_reinitialize_discards_late_prefetch_result(tmp_path, monkeypatch):
 
     p = _provider(tmp_path, monkeypatch, BlockingBackend())
     p._atexit_registered = True
+    p._consecutive_failures = 3
     p._start_prefetch("same query")
     old_thread = p._prefetch_thread
     assert old_thread is not None
@@ -347,5 +348,6 @@ def test_reinitialize_discards_late_prefetch_result(tmp_path, monkeypatch):
     old_thread.join(timeout=5)
 
     assert not old_thread.is_alive()
+    assert p._consecutive_failures == 3
     assert p._prefetch_result == ""
     assert p._prefetch_done is False
