@@ -555,7 +555,7 @@ class Mem0MemoryProvider(MemoryProvider):
         """
         tmp = path.with_suffix(".jsonl.tmp")
         with tmp.open("w", encoding="utf-8", newline="\n") as f:
-            os.fchmod(f.fileno(), 0o600)
+            os.chmod(tmp, 0o600)
             f.write(("\n".join(lines) + "\n") if lines else "")
             f.flush()
             os.fsync(f.fileno())
@@ -612,7 +612,7 @@ class Mem0MemoryProvider(MemoryProvider):
                     except (OSError, ValueError):
                         pass  # missing or empty file
                     with path.open("a", encoding="utf-8", newline="\n") as f:
-                        os.fchmod(f.fileno(), 0o600)
+                        os.chmod(path, 0o600)
                         if needs_nl:
                             f.write("\n")
                         f.write(entry + "\n")
