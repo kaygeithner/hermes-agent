@@ -2916,12 +2916,12 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = SNAPSHOT_SUMMARIZE_T
     omitted = len(lines) - len(head) - len(tail)
     if stored_path:
         note = (
-            f'\n[... {omitted} lines omitted from the MIDDLE; full snapshot: '
+            f'\n[truncated: {omitted} lines omitted from the MIDDLE; full: '
             f'read_file path="{stored_path}" offset={len(head) + 1} limit=200; '
-            'the END of the page follows ...]\n'
+            'END follows]\n'
         )
     else:
-        note = f"\n[... {omitted} lines omitted from the MIDDLE; the END of the page follows ...]\n"
+        note = f"\n[truncated: {omitted} lines omitted from the MIDDLE; END follows]\n"
     return "\n".join(head) + note + "\n".join(tail)
 
 
