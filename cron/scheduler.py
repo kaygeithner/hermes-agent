@@ -2945,6 +2945,10 @@ def run_job(
                 job_id, _mcp_exc,
             )
 
+        # Cron memory stays off unless a trusted job explicitly opts in;
+        # external providers always stay off so cron prompts cannot become
+        # user memories.
+        _allow_memory_writes = job.get("allow_memory_writes") is True
         agent = AIAgent(
             model=model,
             api_key=runtime.get("api_key"),
@@ -2972,7 +2976,8 @@ def run_job(
             # Without a workdir, keep cwd context discovery disabled.
             skip_context_files=not bool(_job_workdir),
             load_soul_identity=True,
-            skip_memory=True,  # Cron system prompts would corrupt user representations
+            skip_memory=not _allow_memory_writes,
+            skip_memory_provider=True,
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,

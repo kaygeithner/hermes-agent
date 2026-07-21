@@ -59,6 +59,43 @@ def test_blank_memory_provider_does_not_auto_enable_honcho():
     save_config.assert_not_called()
 
 
+def test_builtin_memory_can_load_while_external_provider_is_skipped(tmp_path):
+    provider = RecordingMemoryProvider()
+    cfg = {
+        "memory": {
+            "memory_enabled": True,
+            "user_profile_enabled": True,
+            "provider": "recording",
+        },
+        "agent": {},
+    }
+
+    with (
+        patch("hermes_cli.config.load_config", return_value=cfg),
+        patch("tools.memory_tool.get_memory_dir", return_value=tmp_path / "memories"),
+        patch("plugins.memory.load_memory_provider", return_value=provider) as load_provider,
+        patch("agent.model_metadata.get_model_context_length", return_value=204_800),
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=False,
+            skip_memory_provider=True,
+            platform="cron",
+        )
+
+    assert getattr(agent, "_memory_store", None) is not None
+    assert getattr(agent, "_memory_manager", None) is None
+    load_provider.assert_not_called()
+
+
 def test_aiagent_forwards_user_id_alt_to_memory_provider():
     provider = RecordingMemoryProvider()
     cfg = {"memory": {"provider": "recording"}, "agent": {}}
