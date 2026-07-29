@@ -39,3 +39,30 @@ def test_cronjob_schema_required_array_unchanged():
     from tools.cronjob_tools import CRONJOB_SCHEMA
 
     assert CRONJOB_SCHEMA["parameters"]["required"] == ["action"]
+
+
+def test_cronjob_schema_exposes_explicit_memory_write_opt_in():
+    from tools.cronjob_tools import CRONJOB_SCHEMA
+
+    field = CRONJOB_SCHEMA["parameters"]["properties"]["allow_memory_writes"]
+    assert field["type"] == "boolean"
+    assert "explicit" in field["description"].lower()
+
+
+def test_registered_handler_plumbs_boolean_job_options(monkeypatch):
+    import tools.cronjob_tools as cron_tools
+
+    monkeypatch.setattr(cron_tools, "cronjob", lambda **kwargs: kwargs)
+    entry = cron_tools.registry.get_entry("cronjob")
+    assert entry is not None
+
+    result = entry.handler(
+        {
+            "action": "create",
+            "allow_memory_writes": True,
+            "attach_to_session": True,
+        }
+    )
+
+    assert result["allow_memory_writes"] is True
+    assert result["attach_to_session"] is True

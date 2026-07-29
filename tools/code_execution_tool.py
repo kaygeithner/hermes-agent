@@ -265,16 +265,30 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
 
 
 def _child_cache_redirect_env() -> dict[str, str]:
-    """Cache-redirect vars to inject into code-exec children AFTER scrubbing.
+    """Return cache redirects only when their base can be prepared.
 
-    ``_scrub_child_env``'s allowlist DROPS these (none match _SAFE_ENV_PREFIXES),
-    so they must be re-injected explicitly to keep child-tool caches (pytest/
-    ruff/mypy/npm/pycache) out of the child's cwd (e.g. ~/work/). All values are
-    non-secret absolute paths under ``$HERMES_HOME/scratch/caches`` — the same
-    base the service process uses — so this never weakens credential scrubbing."""
+    Best-effort cache hygiene must not inject unusable paths after startup
+    preparation failed (read-only disk, bad HERMES_HOME, disk full, etc.).
+    """
     from agent.cache_redirect import cache_redirect_env, hermes_home_cache_base
 
-    return cache_redirect_env(hermes_home_cache_base())
+    base = hermes_home_cache_base()
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        logger.debug(
+            "execute_code: cache redirect skipped (could not prepare %s)",
+            base,
+            exc_info=True,
+        )
+        return {}
+    return cache_redirect_env(base)
+
+
+def _apply_child_cache_redirect_defaults(child_env: dict[str, str]) -> None:
+    """Inject redirects without clobbering explicitly allowed child values."""
+    for key, value in _child_cache_redirect_env().items():
+        child_env.setdefault(key, value)
 
 
 def _sandbox_cache_env_prefix(sandbox_dir: str) -> str:
@@ -1372,11 +1386,10 @@ def execute_code(
         child_env["HERMES_RPC_SOCKET"] = rpc_endpoint
         child_env["HERMES_RPC_TOKEN"] = rpc_token
         child_env["PYTHONDONTWRITEBYTECODE"] = "1"
-        # Belt-and-suspenders: re-inject cache-redirect vars that _scrub_child_env
-        # drops (none match _SAFE_ENV_PREFIXES), so any absolute-path-respecting
-        # tool the child runs keeps caches out of its cwd (e.g. ~/work/). All
-        # values are non-secret paths under $HERMES_HOME/scratch/caches.
-        child_env.update(_child_cache_redirect_env())
+        # Apply cache redirects after scrubbing, but preserve any explicit value
+        # that survived through env_passthrough. If the cache base cannot be
+        # prepared, best-effort hygiene degrades to the prior behavior.
+        _apply_child_cache_redirect_defaults(child_env)
         # Force UTF-8 for the child's stdio and default file encoding.
         #
         # Without this, on Windows sys.stdout is bound to the console code

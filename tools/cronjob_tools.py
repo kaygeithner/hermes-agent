@@ -598,6 +598,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         result["enabled_toolsets"] = job["enabled_toolsets"]
     if job.get("workdir"):
         result["workdir"] = job["workdir"]
+    if "allow_memory_writes" in job:
+        result["allow_memory_writes"] = bool(job["allow_memory_writes"])
     return result
 
 
@@ -677,6 +679,7 @@ def cronjob(
     workdir: Optional[str] = None,
     no_agent: Optional[bool] = None,
     attach_to_session: Optional[bool] = None,
+    allow_memory_writes: Optional[bool] = None,
     task_id: str = None,
 ) -> str:
     """Unified cron job management tool."""
@@ -750,6 +753,7 @@ def cronjob(
                 workdir=_normalize_optional_job_value(workdir),
                 no_agent=_no_agent,
                 attach_to_session=attach_to_session,
+                allow_memory_writes=allow_memory_writes,
             )
             _notify_provider_jobs_changed_safe()
             _create_message = f"Cron job '{job['name']}' created."
@@ -923,6 +927,8 @@ def cronjob(
                 updates["enabled_toolsets"] = enabled_toolsets or None
             if attach_to_session is not None:
                 updates["attach_to_session"] = bool(attach_to_session)
+            if allow_memory_writes is not None:
+                updates["allow_memory_writes"] = bool(allow_memory_writes)
             if workdir is not None:
                 # Empty string clears the field (restores old behaviour);
                 # otherwise pass raw — update_job() validates / normalizes.
@@ -1085,6 +1091,10 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                 "type": "boolean",
                 "description": "When True, this job becomes CONTINUABLE: the user can reply to its delivery and the agent has the brief in context instead of asking 'what is that?'. On thread-capable platforms (Telegram topics, Discord/Slack threads) a dedicated thread is opened for the job and its replies; on DM-only platforms (WhatsApp/Signal) the brief is mirrored into the origin DM session. Use this for conversational recurring jobs the user will reply to — daily briefings, reminders that kick off follow-up work. Leave unset for fire-and-forget alerts/watchdogs. Overrides the global cron.mirror_delivery config for this one job. Only the origin chat is touched (never fan-out targets); no effect when deliver='local'."
             },
+            "allow_memory_writes": {
+                "type": "boolean",
+                "description": "Explicit per-job opt-in for built-in MEMORY.md/USER.md writes during trusted LLM-driven cron runs. Default is denied; enable only when the user explicitly requested durable memory writes. No effect for no_agent jobs or external memory providers."
+            },
         },
         "required": ["action"]
     }
@@ -1140,6 +1150,8 @@ registry.register(
         enabled_toolsets=args.get("enabled_toolsets"),
         workdir=args.get("workdir"),
         no_agent=args.get("no_agent"),
+        attach_to_session=args.get("attach_to_session"),
+        allow_memory_writes=args.get("allow_memory_writes"),
         task_id=kw.get("task_id"),
     ))(),
     check_fn=check_cronjob_requirements,
