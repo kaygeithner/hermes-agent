@@ -343,18 +343,27 @@ class TestUnifiedCronjobTool:
                 prompt="Maintain explicitly approved durable context",
                 schedule="every 1h",
                 allow_memory_writes=True,
+                attach_to_session=True,
             )
         )
         job_id = created["job_id"]
         assert created["job"]["allow_memory_writes"] is True
+        assert created["job"]["attach_to_session"] is True
 
         updated = json.loads(
-            cronjob(action="update", job_id=job_id, allow_memory_writes=False)
+            cronjob(
+                action="update",
+                job_id=job_id,
+                allow_memory_writes=False,
+                attach_to_session=False,
+            )
         )
         assert updated["job"]["allow_memory_writes"] is False
+        assert updated["job"]["attach_to_session"] is False
 
         listing = json.loads(cronjob(action="list"))
         assert listing["jobs"][0]["allow_memory_writes"] is False
+        assert listing["jobs"][0]["attach_to_session"] is False
 
     @staticmethod
     def _patch_named_legit(monkeypatch):
