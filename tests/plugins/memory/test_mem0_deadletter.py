@@ -320,6 +320,38 @@ def test_sync_turn_accepts_v0182_message_context(tmp_path, monkeypatch):
     assert not p._sync_thread.is_alive()
 
 
+def test_superseded_prefetch_does_not_mutate_breaker_state(tmp_path, monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+
+    class SlowFirstBackend(FakeBackend):
+        def search(self, query, *, filters, top_k=10, rerank=True):
+            if query == "slow":
+                started.set()
+                assert release.wait(timeout=5)
+                raise ConnectionError("stale failure")
+            return []
+
+    p = _provider(tmp_path, monkeypatch, SlowFirstBackend())
+    p._consecutive_failures = 1
+    p._start_prefetch("slow")
+    stale_thread = p._prefetch_thread
+    assert stale_thread is not None
+    assert started.wait(timeout=5)
+
+    p._start_prefetch("current")
+    current_thread = p._prefetch_thread
+    assert current_thread is not None
+    current_thread.join(timeout=5)
+    assert not current_thread.is_alive()
+    assert p._consecutive_failures == 0
+
+    release.set()
+    stale_thread.join(timeout=5)
+    assert not stale_thread.is_alive()
+    assert p._consecutive_failures == 0
+
+
 def test_reinitialize_discards_late_prefetch_result(tmp_path, monkeypatch):
     started = threading.Event()
     release = threading.Event()

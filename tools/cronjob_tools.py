@@ -586,6 +586,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         result["enabled_toolsets"] = job["enabled_toolsets"]
     if job.get("workdir"):
         result["workdir"] = job["workdir"]
+    if "attach_to_session" in job:
+        result["attach_to_session"] = bool(job["attach_to_session"])
     if "allow_memory_writes" in job:
         result["allow_memory_writes"] = bool(job["allow_memory_writes"])
     return result

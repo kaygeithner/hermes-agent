@@ -504,15 +504,14 @@ class Mem0MemoryProvider(MemoryProvider):
                 failure = e
                 logger.debug("Mem0 prefetch failed: %s", e)
             with self._prefetch_lock:
-                if gen != self._prefetch_gen:
+                if gen != self._prefetch_gen or self._prefetch_query != query:
                     return
                 if failure is None:
                     self._record_success()
                 else:
                     self._record_failure()
-                if self._prefetch_query == query:
-                    self._prefetch_result = body
-                    self._prefetch_done = True
+                self._prefetch_result = body
+                self._prefetch_done = True
 
         t = threading.Thread(target=_run, daemon=True, name="mem0-prefetch")
         with self._prefetch_lock:
