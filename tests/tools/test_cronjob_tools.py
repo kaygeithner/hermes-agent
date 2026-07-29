@@ -281,6 +281,26 @@ class TestUnifiedCronjobTool:
         assert resumed["job"]["state"] == "scheduled"
 
 
+    def test_allow_memory_writes_create_update_and_list(self):
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="Maintain explicitly approved durable context",
+                schedule="every 1h",
+                allow_memory_writes=True,
+            )
+        )
+        job_id = created["job_id"]
+        assert created["job"]["allow_memory_writes"] is True
+
+        updated = json.loads(
+            cronjob(action="update", job_id=job_id, allow_memory_writes=False)
+        )
+        assert updated["job"]["allow_memory_writes"] is False
+
+        listing = json.loads(cronjob(action="list"))
+        assert listing["jobs"][0]["allow_memory_writes"] is False
+
     @staticmethod
     def _patch_named_legit(monkeypatch):
         import hermes_cli.runtime_provider as rp

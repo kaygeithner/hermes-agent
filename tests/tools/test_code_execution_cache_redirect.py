@@ -2,6 +2,7 @@ import os
 import shlex
 
 from tools.code_execution_tool import (
+    _apply_child_cache_redirect_defaults,
     _scrub_child_env,
     _child_cache_redirect_env,
     _sandbox_cache_env_prefix,
@@ -42,9 +43,37 @@ def test_injection_restores_cache_vars_after_scrub(monkeypatch, tmp_path):
         is_passthrough=lambda _: False, is_windows=False,
     )
     assert "PYTHONPYCACHEPREFIX" not in scrubbed  # dropped
-    scrubbed.update(_child_cache_redirect_env())   # production does this
+    _apply_child_cache_redirect_defaults(scrubbed)
     assert scrubbed["PYTHONPYCACHEPREFIX"].startswith(str(tmp_path))
     assert os.path.join("scratch", "caches") in scrubbed["PYTHONPYCACHEPREFIX"]
+
+
+def test_cache_redirects_preserve_explicit_passthrough_value(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    child_env = _scrub_child_env(
+        {"RUFF_CACHE_DIR": "/explicit/ruff"},
+        is_passthrough=lambda key: key == "RUFF_CACHE_DIR",
+        is_windows=False,
+    )
+
+    _apply_child_cache_redirect_defaults(child_env)
+
+    assert child_env["RUFF_CACHE_DIR"] == "/explicit/ruff"
+    assert child_env["MYPY_CACHE_DIR"].startswith(str(tmp_path / "hermes"))
+
+
+def test_cache_redirects_degrade_when_cache_base_cannot_be_prepared(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+
+    def fail_makedirs(*_args, **_kwargs):
+        raise OSError("read-only")
+
+    monkeypatch.setattr("os.makedirs", fail_makedirs)
+    child_env = {"PYTHONDONTWRITEBYTECODE": "1"}
+
+    _apply_child_cache_redirect_defaults(child_env)
+
+    assert child_env == {"PYTHONDONTWRITEBYTECODE": "1"}
 
 
 def test_sandbox_cache_env_prefix_is_shell_quoted_and_sandbox_scoped():

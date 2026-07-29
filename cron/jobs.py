@@ -1261,6 +1261,7 @@ def create_job(
     workdir: Optional[str] = None,
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
+    allow_memory_writes: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -1305,6 +1306,8 @@ def create_job(
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
                 watchdogs and periodic alerts that don't need LLM reasoning.
+        allow_memory_writes: Explicit per-job opt-in for built-in MEMORY/USER
+                writes. Omitted/False keeps cron memory writes disabled.
 
     Returns:
         The created job dict
@@ -1337,6 +1340,7 @@ def create_job(
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
+    normalized_memory_writes = allow_memory_writes if isinstance(allow_memory_writes, bool) else None
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -1432,6 +1436,10 @@ def create_job(
     # global cron.mirror_delivery config, default off).
     if normalized_attach is not None:
         job["attach_to_session"] = normalized_attach
+    # Built-in memory writes stay denied unless the creator explicitly opts in.
+    # Persist explicit False as well so updates are inspectable and reversible.
+    if normalized_memory_writes is not None:
+        job["allow_memory_writes"] = normalized_memory_writes
 
     with _jobs_lock():
         jobs = load_jobs()
