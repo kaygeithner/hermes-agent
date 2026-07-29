@@ -323,23 +323,32 @@ def test_sync_turn_accepts_v0182_message_context(tmp_path, monkeypatch):
 def test_superseded_prefetch_does_not_mutate_breaker_state(tmp_path, monkeypatch):
     started = threading.Event()
     release = threading.Event()
+    calls = {"same": 0}
 
     class SlowFirstBackend(FakeBackend):
         def search(self, query, *, filters, top_k=10, rerank=True):
-            if query == "slow":
-                started.set()
-                assert release.wait(timeout=5)
-                raise ConnectionError("stale failure")
+            if query == "same":
+                calls["same"] += 1
+                if calls["same"] == 1:
+                    started.set()
+                    assert release.wait(timeout=5)
+                    raise ConnectionError("stale failure")
             return []
 
     p = _provider(tmp_path, monkeypatch, SlowFirstBackend())
     p._consecutive_failures = 1
-    p._start_prefetch("slow")
+    p._start_prefetch("same")
     stale_thread = p._prefetch_thread
     assert stale_thread is not None
     assert started.wait(timeout=5)
 
-    p._start_prefetch("current")
+    p._start_prefetch("other")
+    middle_thread = p._prefetch_thread
+    assert middle_thread is not None
+    middle_thread.join(timeout=5)
+    assert not middle_thread.is_alive()
+
+    p._start_prefetch("same")
     current_thread = p._prefetch_thread
     assert current_thread is not None
     current_thread.join(timeout=5)
@@ -350,6 +359,8 @@ def test_superseded_prefetch_does_not_mutate_breaker_state(tmp_path, monkeypatch
     stale_thread.join(timeout=5)
     assert not stale_thread.is_alive()
     assert p._consecutive_failures == 0
+    assert p._prefetch_query == "same"
+    assert p._prefetch_done is True
 
 
 def test_reinitialize_discards_late_prefetch_result(tmp_path, monkeypatch):

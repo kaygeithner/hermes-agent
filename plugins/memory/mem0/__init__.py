@@ -236,7 +236,7 @@ class Mem0MemoryProvider(MemoryProvider):
         self._prefetch_query = ""
         self._prefetch_result = ""
         self._prefetch_done = False
-        # Invalidates late prefetch writes when this cached provider is re-used.
+        # Unique launch token; also invalidates late writes on provider reuse.
         self._prefetch_gen = 0
         self._replay_thread = None
         self._shutting_down = False
@@ -488,6 +488,7 @@ class Mem0MemoryProvider(MemoryProvider):
             self._prefetch_query = query
             self._prefetch_result = ""
             self._prefetch_done = False
+            self._prefetch_gen += 1
             gen = self._prefetch_gen
 
         def _run():
