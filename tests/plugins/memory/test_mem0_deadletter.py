@@ -333,6 +333,7 @@ def test_superseded_prefetch_does_not_mutate_breaker_state(tmp_path, monkeypatch
                     started.set()
                     assert release.wait(timeout=5)
                     raise ConnectionError("stale failure")
+                return [{"memory": "current result"}]
             return []
 
     p = _provider(tmp_path, monkeypatch, SlowFirstBackend())
@@ -360,6 +361,7 @@ def test_superseded_prefetch_does_not_mutate_breaker_state(tmp_path, monkeypatch
     assert not stale_thread.is_alive()
     assert p._consecutive_failures == 0
     assert p._prefetch_query == "same"
+    assert p._prefetch_result == "## Mem0 Memory\n- current result"
     assert p._prefetch_done is True
 
 
