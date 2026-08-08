@@ -322,6 +322,34 @@ class TestBrowserFrame:
             ("frame", ["main"]),
         ]
 
+    def test_failed_return_to_main_keeps_frame_fail_closed(self):
+        import tools.browser_tool as bt
+
+        def run(_task_id, command, args):
+            if command == "frame" and args == ["main"]:
+                return {"success": False, "error": "stuck"}
+            if command == "snapshot":
+                return {"success": True, "data": {"snapshot": "metadata", "refs": {}}}
+            return {"success": True, "data": {"value": "https://example.com/embed"}}
+
+        policy_error = "Blocked: loaded iframe targets a cloud metadata endpoint"
+        try:
+            with (
+                patch.object(bt, "_is_camofox_mode", return_value=False),
+                patch.object(bt, "_last_session_key", return_value="session"),
+                patch.object(bt, "_run_browser_command", side_effect=run),
+                patch.object(bt, "_loaded_frame_policy_error", return_value=policy_error) as policy,
+            ):
+                switched = json.loads(bt.browser_frame("@e2"))
+                snapshot = json.loads(bt.browser_snapshot())
+
+            assert switched["success"] is False
+            assert snapshot["success"] is False
+            assert policy.call_count == 2
+            assert "session" in bt._framed_sessions
+        finally:
+            bt._framed_sessions.discard("session")
+
     def test_threshold_aligned_with_web_extract_budget(self):
         """Snapshot and web_extract share the truncate-and-store pattern —
         the per-page budget the model sees must stay aligned between them."""

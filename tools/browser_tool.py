@@ -3210,8 +3210,9 @@ def browser_snapshot(
         if effective_task_id in _framed_sessions:
             blocked = _loaded_frame_policy_error(effective_task_id)
             if blocked:
-                _run_browser_command(effective_task_id, "frame", ["main"])
-                _framed_sessions.discard(effective_task_id)
+                reset = _run_browser_command(effective_task_id, "frame", ["main"])
+                if reset.get("success"):
+                    _framed_sessions.discard(effective_task_id)
                 return json.dumps({"success": False, "error": blocked})
         data = result.get("data", {})
         snapshot_text = data.get("snapshot", "")
@@ -3458,12 +3459,13 @@ def browser_frame(target: str, task_id: Optional[str] = None) -> str:
         if t == "main":
             _framed_sessions.discard(effective_task_id)
         else:
+            _framed_sessions.add(effective_task_id)
             blocked = _loaded_frame_policy_error(effective_task_id)
             if blocked:
-                _run_browser_command(effective_task_id, "frame", ["main"])
-                _framed_sessions.discard(effective_task_id)
+                reset = _run_browser_command(effective_task_id, "frame", ["main"])
+                if reset.get("success"):
+                    _framed_sessions.discard(effective_task_id)
                 return json.dumps({"success": False, "error": blocked})
-            _framed_sessions.add(effective_task_id)
         response = {
             "success": True,
             "frame": t,
