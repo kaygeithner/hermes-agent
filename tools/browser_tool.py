@@ -1519,6 +1519,7 @@ def _socket_safe_tmpdir() -> str:
 # Stores: session_name (always), bb_session_id + cdp_url (cloud mode only)
 _active_sessions: Dict[str, Dict[str, Any]] = {}  # session_key -> {session_name, ...}
 _recording_sessions: set = set()  # session_keys with active recordings
+_framed_sessions: set[str] = set()  # session_keys currently scoped to an iframe
 
 # Tracks the most recent session_key used per task_id. Set by browser_navigate()
 # after it chooses a backend for a URL; read by every non-nav browser tool
@@ -3206,6 +3207,12 @@ def browser_snapshot(
     result = _run_browser_command(effective_task_id, "snapshot", args)
 
     if result.get("success"):
+        if effective_task_id in _framed_sessions:
+            blocked = _loaded_frame_policy_error(effective_task_id)
+            if blocked:
+                _run_browser_command(effective_task_id, "frame", ["main"])
+                _framed_sessions.discard(effective_task_id)
+                return json.dumps({"success": False, "error": blocked})
         data = result.get("data", {})
         snapshot_text = data.get("snapshot", "")
         refs = data.get("refs", {})
@@ -3316,6 +3323,62 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
+def _loaded_frame_policy_error(task_id: str) -> Optional[str]:
+    """Return an error if any loaded child frame URL cannot be proved safe."""
+    try:
+        cdp = _run_browser_command(task_id, "get", ["cdp-url"])
+        page = _run_browser_command(task_id, "get", ["url"])
+        cdp_url = str((cdp.get("data") or {}).get("cdpUrl") or "")
+        page_data = page.get("data") or {}
+        page_url = str(page_data.get("url") or page_data.get("value") or "")
+        if not cdp.get("success") or not page.get("success") or not cdp_url or not page_url:
+            raise RuntimeError("CDP endpoint or top-page URL unavailable")
+
+        from tools.browser_cdp_tool import _cdp_call, _run_async
+
+        infos = _run_async(_cdp_call(cdp_url, "Target.getTargets", {}, None, 10.0))[
+            "targetInfos"
+        ]
+        pages = [info for info in infos if info.get("type") == "page"]
+        matches = [info for info in pages if info.get("url") == page_url]
+        if len(matches) == 1:
+            target_id = matches[0]["targetId"]
+        elif len(pages) == 1:
+            target_id = pages[0]["targetId"]
+        else:
+            raise RuntimeError("active page target is ambiguous")
+        tree = _run_async(
+            _cdp_call(cdp_url, "Page.getFrameTree", {}, target_id, 10.0)
+        )["frameTree"]
+
+        urls: list[str] = []
+
+        def collect(node: Dict[str, Any]) -> None:
+            for child in node.get("childFrames") or []:
+                urls.append(str((child.get("frame") or {}).get("url") or "").strip())
+                collect(child)
+
+        collect(tree)
+        if not urls:
+            raise RuntimeError("loaded child frame was not present in the CDP frame tree")
+        for url in urls:
+            if not url:
+                raise RuntimeError("loaded child frame URL is empty")
+            if url.startswith(("about:", "data:")):
+                continue
+            if _is_always_blocked_url(url):
+                return "Blocked: loaded iframe targets a cloud metadata endpoint"
+            if not _is_local_backend() and not _allow_private_urls() and not _is_safe_url(url):
+                return "Blocked: loaded iframe targets a private or internal address"
+            policy = check_website_access(url)
+            if policy:
+                return policy["message"]
+        return None
+    except Exception as exc:
+        logger.warning("Could not verify loaded iframe URL via CDP: %s", exc)
+        return "Blocked: could not verify the loaded iframe's final URL"
+
+
 def browser_frame(target: str, task_id: Optional[str] = None) -> str:
     """
     Switch the active browser context into an iframe (by ref) or back to main.
@@ -3392,6 +3455,15 @@ def browser_frame(target: str, task_id: Optional[str] = None) -> str:
     result = _run_browser_command(effective_task_id, "frame", [t])
 
     if result.get("success"):
+        if t == "main":
+            _framed_sessions.discard(effective_task_id)
+        else:
+            blocked = _loaded_frame_policy_error(effective_task_id)
+            if blocked:
+                _run_browser_command(effective_task_id, "frame", ["main"])
+                _framed_sessions.discard(effective_task_id)
+                return json.dumps({"success": False, "error": blocked})
+            _framed_sessions.add(effective_task_id)
         response = {
             "success": True,
             "frame": t,
@@ -4717,6 +4789,7 @@ def _cleanup_single_browser_session(task_id: str) -> None:
         with _cleanup_lock:
             _active_sessions.pop(task_id, None)
             _session_last_activity.pop(task_id, None)
+            _framed_sessions.discard(task_id)
 
         # Cloud mode: close the cloud browser session via provider API.
         # Local sidecars have bb_session_id=None so this no-ops for them.

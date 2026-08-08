@@ -1073,11 +1073,15 @@ class Mem0MemoryProvider(MemoryProvider):
         deadline = time.monotonic() + 30.0
         # The final write is the only must-preserve operation. Replay and
         # read-only prefetch share whatever remains of the same shutdown budget.
-        for t in (self._sync_thread, self._replay_thread, self._prefetch_thread):
+        def join(t):
             if t and t.is_alive():
                 remaining = max(0.0, deadline - time.monotonic())
                 if remaining:
                     t.join(timeout=remaining)
+
+        join(self._sync_thread)
+        join(self._replay_thread)  # sync may have published this while joining
+        join(self._prefetch_thread)
         self._shutdown_backend()
 
 

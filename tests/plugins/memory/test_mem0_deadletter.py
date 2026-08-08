@@ -382,8 +382,13 @@ def test_shutdown_uses_one_deadline_and_prioritizes_sync(monkeypatch):
         def join(self, timeout):
             joins.append((self.name, timeout))
 
-    p._sync_thread = FakeThread("sync")
-    p._replay_thread = FakeThread("replay")
+    class SyncThread(FakeThread):
+        def join(self, timeout):
+            super().join(timeout)
+            p._replay_thread = FakeThread("replay")
+
+    p._sync_thread = SyncThread("sync")
+    p._replay_thread = None
     p._prefetch_thread = FakeThread("prefetch")
     ticks = iter((100.0, 100.0, 110.0, 125.0))
     monkeypatch.setattr(time, "monotonic", lambda: next(ticks))

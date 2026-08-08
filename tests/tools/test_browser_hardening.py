@@ -247,6 +247,7 @@ class TestBrowserFrame:
             patch.object(bt, "_is_camofox_mode", return_value=False),
             patch.object(bt, "_last_session_key", return_value="session"),
             patch.object(bt, "_run_browser_command", side_effect=run),
+            patch.object(bt, "_loaded_frame_policy_error", return_value=None),
         ):
             result = bt.browser_frame(target)
 
@@ -294,6 +295,32 @@ class TestBrowserFrame:
         assert result["success"] is False
         assert "private" in result["error"].lower()
         assert all(call.args[1] != "frame" for call in run.call_args_list)
+
+    def test_blocks_unsafe_final_frame_url_and_returns_to_main(self):
+        import tools.browser_tool as bt
+
+        with (
+            patch.object(bt, "_is_camofox_mode", return_value=False),
+            patch.object(bt, "_last_session_key", return_value="session"),
+            patch.object(
+                bt,
+                "_run_browser_command",
+                return_value={"success": True, "data": {"value": "https://example.com/embed"}},
+            ) as run,
+            patch.object(
+                bt,
+                "_loaded_frame_policy_error",
+                return_value="Blocked: loaded iframe targets a cloud metadata endpoint",
+            ),
+        ):
+            result = json.loads(bt.browser_frame("@e2"))
+
+        assert result["success"] is False
+        assert "metadata" in result["error"].lower()
+        assert [(c.args[1], c.args[2]) for c in run.call_args_list[-2:]] == [
+            ("frame", ["@e2"]),
+            ("frame", ["main"]),
+        ]
 
     def test_threshold_aligned_with_web_extract_budget(self):
         """Snapshot and web_extract share the truncate-and-store pattern —
