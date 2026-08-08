@@ -1,6 +1,7 @@
 """Tests for browser_tool.py hardening: caching, security, thread safety, truncation."""
 
 import inspect
+import json
 import re
 from unittest.mock import MagicMock, patch
 
@@ -234,15 +235,65 @@ class TestBrowserFrame:
     @pytest.mark.parametrize(("target", "expected"), [("e2", "@e2"), ("main", "main")])
     def test_routes_normalized_target(self, target, expected):
         import tools.browser_tool as bt
+        commands = []
+
+        def run(task_id, command, args):
+            commands.append((task_id, command, args))
+            if command == "get":
+                return {"success": True, "data": {"value": "https://example.com/embed"}}
+            return {"success": True}
+
         with (
             patch.object(bt, "_is_camofox_mode", return_value=False),
             patch.object(bt, "_last_session_key", return_value="session"),
-            patch.object(bt, "_run_browser_command", return_value={"success": True}) as run,
+            patch.object(bt, "_run_browser_command", side_effect=run),
         ):
             result = bt.browser_frame(target)
 
-        run.assert_called_once_with("session", "frame", [expected])
+        assert commands[-1] == ("session", "frame", [expected])
         assert '"success": true' in result
+
+    def test_blocks_metadata_iframe_before_switch(self):
+        import tools.browser_tool as bt
+        commands = []
+
+        def run(task_id, command, args):
+            commands.append((task_id, command, args))
+            return {"success": True, "data": {"value": "http://169.254.169.254/latest/meta-data"}}
+
+        with (
+            patch.object(bt, "_is_camofox_mode", return_value=False),
+            patch.object(bt, "_last_session_key", return_value="session"),
+            patch.object(bt, "_run_browser_command", side_effect=run),
+            patch.object(bt, "_is_always_blocked_url", return_value=True),
+        ):
+            result = json.loads(bt.browser_frame("@e2"))
+
+        assert result["success"] is False
+        assert "metadata" in result["error"].lower()
+        assert all(command != "frame" for _, command, _ in commands)
+
+    def test_blocks_private_iframe_when_policy_disallows_it(self):
+        import tools.browser_tool as bt
+
+        with (
+            patch.object(bt, "_is_camofox_mode", return_value=False),
+            patch.object(bt, "_last_session_key", return_value="session"),
+            patch.object(
+                bt,
+                "_run_browser_command",
+                return_value={"success": True, "data": {"value": "http://10.0.0.8/admin"}},
+            ) as run,
+            patch.object(bt, "_is_always_blocked_url", return_value=False),
+            patch.object(bt, "_is_local_backend", return_value=False),
+            patch.object(bt, "_allow_private_urls", return_value=False),
+            patch.object(bt, "_is_safe_url", return_value=False),
+        ):
+            result = json.loads(bt.browser_frame("@e2"))
+
+        assert result["success"] is False
+        assert "private" in result["error"].lower()
+        assert all(call.args[1] != "frame" for call in run.call_args_list)
 
     def test_threshold_aligned_with_web_extract_budget(self):
         """Snapshot and web_extract share the truncate-and-store pattern —

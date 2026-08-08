@@ -69,6 +69,15 @@ _EXCLUDED_DIRS = {
     ".ruff_cache",
 }
 
+# Generated roots whose parent also holds user-authored artifacts. Matching by
+# prefix avoids excluding all of ``scratch`` merely because redirect caches live
+# beneath it.
+_EXCLUDED_CACHE_ROOTS = {
+    ("scratch", "caches"),
+    ("cache",),
+    ("web_cache",),
+}
+
 # File-name suffixes to skip
 _EXCLUDED_SUFFIXES = (
     ".pyc",
@@ -212,6 +221,9 @@ def _iter_external_files(base: Path) -> List[Path]:
 def _should_exclude(rel_path: Path) -> bool:
     """Return True if *rel_path* (relative to hermes root) should be skipped."""
     parts = rel_path.parts
+
+    if any(parts[:len(root)] == root for root in _EXCLUDED_CACHE_ROOTS):
+        return True
 
     for part in parts:
         if part not in _EXCLUDED_DIRS:

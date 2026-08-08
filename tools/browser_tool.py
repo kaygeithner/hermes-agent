@@ -3336,6 +3336,59 @@ def browser_frame(target: str, task_id: Optional[str] = None) -> str:
     if t != "main" and not t.startswith("@"):
         t = f"@{t}"
 
+    if t != "main":
+        # Resolve the iframe's URL while still in the parent context. Once the
+        # frame is active, agent-browser's URL probe remains scoped to the top
+        # page and cannot enforce the navigation SSRF floor reliably.
+        src_result = _run_browser_command(
+            effective_task_id, "get", ["attr", t, "src"])
+        if not src_result.get("success"):
+            return json.dumps({
+                "success": False,
+                "error": "Blocked: could not verify iframe URL before switching",
+            })
+        src = str((src_result.get("data") or {}).get("value") or "").strip()
+        if src and not src.startswith(("about:", "data:")):
+            from urllib.parse import urljoin, urlparse
+
+            if not urlparse(src).scheme:
+                page_result = _run_browser_command(
+                    effective_task_id, "get", ["url"])
+                data = page_result.get("data") or {}
+                page_url = str(data.get("url") or data.get("value") or "")
+                if not page_result.get("success") or not page_url:
+                    return json.dumps({
+                        "success": False,
+                        "error": "Blocked: could not resolve relative iframe URL",
+                    })
+                src = urljoin(page_url, src)
+
+            if _is_always_blocked_url(src):
+                return json.dumps({
+                    "success": False,
+                    "error": "Blocked: iframe targets a cloud metadata endpoint",
+                })
+            if (
+                not _is_local_backend()
+                and not _allow_private_urls()
+                and not _is_safe_url(src)
+            ):
+                return json.dumps({
+                    "success": False,
+                    "error": "Blocked: iframe targets a private or internal address",
+                })
+            blocked = check_website_access(src)
+            if blocked:
+                return json.dumps({
+                    "success": False,
+                    "error": blocked["message"],
+                    "blocked_by_policy": {
+                        "host": blocked["host"],
+                        "rule": blocked["rule"],
+                        "source": blocked["source"],
+                    },
+                })
+
     result = _run_browser_command(effective_task_id, "frame", [t])
 
     if result.get("success"):

@@ -1,6 +1,7 @@
 """Tests for the mem0 dead-letter queue and current-turn prefetch."""
 
 import json
+import os
 import threading
 import time
 
@@ -298,6 +299,100 @@ def test_append_failure_reports_not_queued(tmp_path, monkeypatch):
     p = _provider(tmp_path, monkeypatch, backend)
     monkeypatch.setattr(p, "_deadletter_path", lambda: (_ for _ in ()).throw(OSError("no home")))
     assert p._deadletter_append("u", "a") is False
+
+
+def test_deadletter_creation_is_atomic_0600_and_fsyncs_parent(tmp_path, monkeypatch):
+    p = _provider(tmp_path, monkeypatch, FakeBackend())
+    path = _deadletter(tmp_path)
+    real_open = os.open
+    opens = []
+    fsyncs = []
+
+    def tracked_open(raw, flags, mode=0o777):
+        opens.append((os.fspath(raw), flags, mode))
+        return real_open(raw, flags, mode)
+
+    monkeypatch.setattr(os, "open", tracked_open)
+    monkeypatch.setattr(os, "fsync", lambda fd: fsyncs.append(fd))
+
+    assert p._deadletter_append("private", "turn") is True
+    queue_opens = [c for c in opens if c[0] == os.fspath(path)]
+    assert queue_opens
+    _, flags, mode = queue_opens[-1]
+    assert flags & os.O_CREAT
+    assert flags & os.O_APPEND
+    assert mode == 0o600
+    assert len(fsyncs) >= 2  # queue contents plus containing directory
+
+
+def test_deadletter_rewrite_uses_secure_temp_and_fsyncs_parent(tmp_path, monkeypatch):
+    p = _provider(tmp_path, monkeypatch, FakeBackend())
+    path = _deadletter(tmp_path)
+    path.parent.mkdir(parents=True)
+    real_open = os.open
+    opens = []
+    fsyncs = []
+
+    def tracked_open(raw, flags, mode=0o777):
+        opens.append((os.fspath(raw), flags, mode))
+        return real_open(raw, flags, mode)
+
+    monkeypatch.setattr(os, "open", tracked_open)
+    monkeypatch.setattr(os, "fsync", lambda fd: fsyncs.append(fd))
+    p._deadletter_write(path, [json.dumps({"ts": 1, "messages": []})])
+
+    temp = os.fspath(path.with_suffix(".jsonl.tmp"))
+    temp_opens = [c for c in opens if c[0] == temp]
+    assert temp_opens
+    assert temp_opens[-1][2] == 0o600
+    assert len(fsyncs) >= 2  # temp contents plus rename directory
+
+
+def test_windows_drain_lock_is_nonblocking(tmp_path, monkeypatch):
+    import plugins.memory.mem0 as mem0_mod
+
+    calls = []
+
+    class FakeMsvcrt:
+        LK_NBLCK = 2
+
+        @staticmethod
+        def locking(fd, mode, count):
+            calls.append((fd, mode, count))
+
+    monkeypatch.setattr(mem0_mod, "fcntl", None)
+    monkeypatch.setattr(mem0_mod, "msvcrt", FakeMsvcrt, raising=False)
+    lock = Mem0MemoryProvider._try_drain_lock(tmp_path / "drain.lock")
+    assert lock is not None
+    lock.close()
+    assert calls and calls[0][1:] == (FakeMsvcrt.LK_NBLCK, 1)
+
+
+def test_shutdown_uses_one_deadline_and_prioritizes_sync(monkeypatch):
+    p = Mem0MemoryProvider()
+    joins = []
+
+    class FakeThread:
+        def __init__(self, name):
+            self.name = name
+
+        def is_alive(self):
+            return True
+
+        def join(self, timeout):
+            joins.append((self.name, timeout))
+
+    p._sync_thread = FakeThread("sync")
+    p._replay_thread = FakeThread("replay")
+    p._prefetch_thread = FakeThread("prefetch")
+    ticks = iter((100.0, 100.0, 110.0, 125.0))
+    monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(p, "_shutdown_backend", lambda: None)
+
+    p.shutdown()
+
+    assert [name for name, _ in joins] == ["sync", "replay", "prefetch"]
+    assert [timeout for _, timeout in joins] == [30.0, 20.0, 5.0]
 
 
 def test_current_turn_prefetch(tmp_path, monkeypatch):

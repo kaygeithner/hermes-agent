@@ -138,6 +138,14 @@ class TestShouldExclude:
 
         assert _should_exclude(Path("browser-profiles/default/History"))
 
+    def test_excludes_generated_browser_and_redirect_caches(self):
+        from hermes_cli.backup import _should_exclude
+
+        assert _should_exclude(Path("scratch/caches/model-response.bin"))
+        assert _should_exclude(Path("cache/web/snapshot.txt"))
+        assert _should_exclude(Path("web_cache/legacy-snapshot.txt"))
+        assert not _should_exclude(Path("scratch/user-artifact.txt"))
+
 
 # ---------------------------------------------------------------------------
 # Backup tests

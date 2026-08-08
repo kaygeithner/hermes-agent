@@ -43,8 +43,13 @@ from typing import Any, Dict, List
 
 try:
     import fcntl
-except ImportError:  # Windows — no cross-process drain exclusion (dedup absorbs)
+except ImportError:
     fcntl = None
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
 
 from agent.memory_provider import MemoryProvider
 from agent.secret_scope import get_secret
@@ -553,6 +558,19 @@ class Mem0MemoryProvider(MemoryProvider):
         return [l for l in raw.split("\n") if l.strip()]
 
     @staticmethod
+    def _fsync_parent(path) -> None:
+        """Persist a created/replaced directory entry where supported."""
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        try:
+            fd = os.open(path.parent, flags)
+        except OSError:
+            return  # Windows and some filesystems do not allow directory fsync
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    @staticmethod
     def _deadletter_write(path, lines: list) -> None:
         """Atomically replace the queue file (caller holds the locks).
 
@@ -561,12 +579,17 @@ class Mem0MemoryProvider(MemoryProvider):
         losing the whole queue in one shot.
         """
         tmp = path.with_suffix(".jsonl.tmp")
-        with tmp.open("w", encoding="utf-8", newline="\n") as f:
-            os.chmod(tmp, 0o600)
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(("\n".join(lines) + "\n") if lines else "")
             f.flush()
             os.fsync(f.fileno())
         atomic_replace(tmp, path)
+        Mem0MemoryProvider._fsync_parent(path)
 
     @staticmethod
     def _deadletter_bound(lines: list) -> list:
@@ -607,7 +630,10 @@ class Mem0MemoryProvider(MemoryProvider):
             }, ensure_ascii=False)
             with self._deadletter_lock:
                 path = self._deadletter_path()
+                parent_existed = path.parent.exists()
                 path.parent.mkdir(parents=True, exist_ok=True)
+                if not parent_existed:
+                    self._fsync_parent(path.parent)
                 with MemoryStore._file_lock(path):
                     # Heal a crash-truncated tail (no trailing newline) so the
                     # new entry doesn't merge into the partial line.
@@ -618,8 +644,14 @@ class Mem0MemoryProvider(MemoryProvider):
                             needs_nl = f.read(1) != b"\n"
                     except (OSError, ValueError):
                         pass  # missing or empty file
-                    with path.open("a", encoding="utf-8", newline="\n") as f:
-                        os.chmod(path, 0o600)
+                    fd = os.open(
+                        path,
+                        os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                        0o600,
+                    )
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(fd, 0o600)
+                    with os.fdopen(fd, "a", encoding="utf-8", newline="\n") as f:
                         if needs_nl:
                             f.write("\n")
                         f.write(entry + "\n")
@@ -627,6 +659,7 @@ class Mem0MemoryProvider(MemoryProvider):
                         # fsync: "queued for replay" must survive a power loss
                         # — same durability the rewrite path already provides
                         os.fsync(f.fileno())
+                    self._fsync_parent(path)
                     queued = True
                     try:
                         if path.stat().st_size > _DEADLETTER_TRIM_BYTES:
@@ -735,13 +768,26 @@ class Mem0MemoryProvider(MemoryProvider):
     def _try_drain_lock(lock_path):
         """Acquire the cross-process drain lock without blocking.
 
-        Returns an open file handle holding the flock (close to release),
-        or None if another process's drain holds it. Windows has no fcntl;
-        it degrades to no cross-process exclusion (dedup absorbs overlap).
+        Returns an open file handle holding the platform lock (close to release),
+        or None if another process's drain holds it.
         """
-        f = lock_path.open("a")
+        f = lock_path.open("a+b")
         if fcntl is None:
-            return f
+            if msvcrt is None:
+                f.close()
+                return None
+            try:
+                f.seek(0, os.SEEK_END)
+                if f.tell() == 0:
+                    f.write(b"\0")
+                    f.flush()
+                f.seek(0)
+                msvcrt.locking(  # type: ignore[attr-defined]
+                    f.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+                return f
+            except OSError:
+                f.close()
+                return None
         try:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             return f
@@ -1024,15 +1070,14 @@ class Mem0MemoryProvider(MemoryProvider):
         # Stop the drain between entries and make sure a post-shutdown add
         # failure is never counted as a replay attempt.
         self._shutting_down = True
-        for t in (self._prefetch_thread, self._sync_thread):
+        deadline = time.monotonic() + 30.0
+        # The final write is the only must-preserve operation. Replay and
+        # read-only prefetch share whatever remains of the same shutdown budget.
+        for t in (self._sync_thread, self._replay_thread, self._prefetch_thread):
             if t and t.is_alive():
-                t.join(timeout=30.0)
-        # Re-read AFTER the sync join: a drain the final sync spawned (or one
-        # already running) exits at its next between-entries check, so this
-        # join is bounded by one in-flight add, not the whole backlog.
-        t = self._replay_thread
-        if t and t.is_alive():
-            t.join(timeout=30.0)
+                remaining = max(0.0, deadline - time.monotonic())
+                if remaining:
+                    t.join(timeout=remaining)
         self._shutdown_backend()
 
 
