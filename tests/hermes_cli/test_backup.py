@@ -133,12 +133,36 @@ class TestShouldExclude:
         # The .db itself is still included (and safe-copied separately)
         assert not _should_exclude(Path("state.db"))
 
+    def test_excludes_live_browser_profiles(self):
+        from hermes_cli.backup import _should_exclude
+
+        assert _should_exclude(Path("browser-profiles/default/History"))
+
 
 # ---------------------------------------------------------------------------
 # Backup tests
 # ---------------------------------------------------------------------------
 
 class TestBackup:
+
+    def test_stored_compression_mode(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HERMES_BACKUP_COMPRESSION", "stored")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_zip = tmp_path / "backup.zip"
+        from hermes_cli.backup import _write_full_zip_backup, run_backup
+
+        run_backup(Namespace(output=str(out_zip)))
+        pre_update_zip = tmp_path / "pre-update.zip"
+        assert _write_full_zip_backup(pre_update_zip, hermes_home) == pre_update_zip
+        for path in (out_zip, pre_update_zip):
+            with zipfile.ZipFile(path) as archive:
+                assert archive.infolist()
+                assert all(info.compress_type == zipfile.ZIP_STORED for info in archive.infolist())
 
 
     def test_db_snapshots_staged_beside_output_zip(self, tmp_path, monkeypatch):
