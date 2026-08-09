@@ -1174,13 +1174,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
             base_url_host_matches(agent.base_url, "models.github.ai")
             or base_url_host_matches(agent.base_url, "githubcopilot.com")
         )
-        is_codex_backend = (
-            agent.provider == "openai-codex"
-            or (
-                agent._base_url_hostname == "chatgpt.com"
-                and "/backend-api/codex" in agent._base_url_lower
-            )
-        )
+        is_codex_backend = agent._is_codex_backend()
         is_xai_responses = agent.provider in {"xai", "xai-oauth"} or agent._base_url_hostname == "api.x.ai"
         _msgs_for_codex = agent._prepare_messages_for_non_vision_model(api_messages)
 

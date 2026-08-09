@@ -429,3 +429,22 @@ class TestAgentInitConfig:
         agent.codex_responses_native_compaction = True
         kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
         assert "context_management" not in kwargs
+
+    def test_kwargs_omit_field_when_codex_label_uses_foreign_route(self):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            api_mode="codex_responses",
+            model="gpt-5.6",
+            provider="openai-codex",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            enabled_toolsets=[],
+        )
+        agent.codex_responses_native_compaction = True
+        kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+        assert not agent._is_codex_backend()
+        assert "context_management" not in kwargs
