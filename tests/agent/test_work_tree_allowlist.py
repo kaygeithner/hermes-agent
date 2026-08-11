@@ -17,16 +17,18 @@ def test_load_allowlist_parses_names_and_skips_comments_and_blanks(tmp_path):
 
 
 def test_load_allowlist_seed_file_has_expected_dossiers():
-    # The committed seed file must parse to exactly the 7 approved dossiers
-    # (2026-07 resync: ai-agent-tooling-research removed with the dossier).
+    # The committed seed file must parse to exactly the approved workspace roots.
     import os
     repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     path = os.path.join(repo_root, "config", "work-tree-allowlist.txt")
     names = load_allowlist(path)
     assert names == {
         "apmt-work-intelligence", "archive",
-        "browser-harness", "context-system", "hermes-context-audits",
-        "hermes-ops", "personal-admin-finance-vendors",
+        "browser-harness", "checkpoints", "context-system", "deliverables",
+        "goals", "graphiti-pilot", "head-ade-application",
+        "hermes-context-audits", "hermes-ops",
+        "personal-admin-finance-vendors", "research", "scratch",
+        "silent-structural-risk-rewrite",
     }
 
 
