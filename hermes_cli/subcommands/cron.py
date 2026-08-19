@@ -67,6 +67,14 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         ),
     )
     cron_create.add_argument(
+        "--allow-memory-writes",
+        action="store_true",
+        help=(
+            "Explicitly allow this LLM-driven job to write built-in durable memory. "
+            "Local operator surface only; external memory providers remain disabled."
+        ),
+    )
+    cron_create.add_argument(
         "--monitor-script",
         dest="monitor_script",
         help=(
@@ -177,6 +185,22 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         action="store_const",
         const=False,
         help="Disable no-agent mode on this job (reverts to LLM-driven execution).",
+    )
+    memory_writes = cron_edit.add_mutually_exclusive_group()
+    memory_writes.add_argument(
+        "--allow-memory-writes",
+        dest="allow_memory_writes",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Allow this LLM-driven job to write built-in durable memory.",
+    )
+    memory_writes.add_argument(
+        "--deny-memory-writes",
+        dest="allow_memory_writes",
+        action="store_const",
+        const=False,
+        help="Deny this job access to built-in durable memory (default).",
     )
     cron_edit.add_argument(
         "--continuity",

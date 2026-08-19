@@ -145,6 +145,19 @@ class TestShouldExclude:
         # The .db itself is still included (and safe-copied separately)
         assert not _should_exclude(Path("state.db"))
 
+    def test_excludes_local_generated_roots_only(self):
+        from hermes_cli.backup import _should_exclude
+
+        for path in (
+            "browser-profiles/o365/Default/History",
+            "scratch/caches/browser/state",
+            "cache/provider/data",
+            "web_cache/page.json",
+        ):
+            assert _should_exclude(Path(path))
+        assert not _should_exclude(Path("scratch/notes.txt"))
+        assert not _should_exclude(Path("skills/example/cache/data.txt"))
+
 
 # ---------------------------------------------------------------------------
 # Backup tests
@@ -213,10 +226,61 @@ class TestBackup:
         assert staged_dirs, "no SQLite snapshot was staged"
         assert all(d == str(out_zip.parent) for d in staged_dirs), staged_dirs
 
+    @pytest.mark.parametrize(
+        ("compression", "expected"),
+        [(None, zipfile.ZIP_DEFLATED), ("stored", zipfile.ZIP_STORED)],
+    )
+    def test_backup_compression_mode(self, tmp_path, monkeypatch, compression, expected):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
+        out_zip = tmp_path / f"backup-{compression or 'default'}.zip"
+        args = Namespace(output=str(out_zip))
+        if compression is not None:
+            args.compression = compression
 
+        from hermes_cli.backup import run_backup
 
+        run_backup(args)
+        with zipfile.ZipFile(out_zip) as zf:
+            assert zf.getinfo("config.yaml").compress_type == expected
 
+    def test_generated_roots_are_pruned_before_locked_browser_files(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        excluded = {
+            "browser-profiles/o365/Default/History": b"locked",
+            "scratch/caches/browser/state": b"generated",
+            "cache/provider/data": b"generated",
+            "web_cache/page.json": b"generated",
+        }
+        for rel, content in excluded.items():
+            path = hermes_home / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        locked_root = hermes_home / "browser-profiles"
+        locked_root.chmod(0)
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        out_zip = tmp_path / "excluded-roots.zip"
+        try:
+            from hermes_cli.backup import run_backup
+
+            run_backup(Namespace(output=str(out_zip)))
+        finally:
+            locked_root.chmod(0o700)
+
+        with zipfile.ZipFile(out_zip) as zf:
+            names = set(zf.namelist())
+        assert names.isdisjoint(excluded)
+        assert "skills/my-skill/SKILL.md" in names
 
     def test_skips_symlinked_files(self, tmp_path, monkeypatch):
         """Backup must not dereference symlinks and leak files outside HERMES_HOME."""
@@ -834,6 +898,35 @@ class TestImportAtomicWrites:
 
         assert target.read_text() == "model: restored\n"
         assert (target.stat().st_mode & 0o777) == 0o644
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+    def test_new_files_restore_archived_modes_without_privileged_bits(
+        self, tmp_path, monkeypatch
+    ):
+        """Fresh recovery must retain executability and owner-only modes."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        zip_path = tmp_path / "backup.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            for name, mode in (
+                ("config.yaml", 0o600),
+                ("scripts/run.sh", 0o6755),
+                ("state.db", 0o600),
+            ):
+                info = zipfile.ZipInfo(name)
+                info.external_attr = (stat.S_IFREG | mode) << 16
+                zf.writestr(info, b"test\n")
+
+        from hermes_cli.backup import run_import
+
+        run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        assert stat.S_IMODE((hermes_home / "config.yaml").stat().st_mode) == 0o600
+        assert stat.S_IMODE((hermes_home / "scripts/run.sh").stat().st_mode) == 0o755
+        assert stat.S_IMODE((hermes_home / "state.db").stat().st_mode) == 0o600
 
     @pytest.mark.skipif(os.name != "posix", reason="POSIX ownership")
     def test_restore_preserves_existing_file_owner(self, tmp_path, monkeypatch):

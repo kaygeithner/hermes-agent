@@ -1,7 +1,11 @@
 """Tests for browser_tool.py hardening: caching, security, thread safety, truncation."""
 
 import inspect
+import json
+import os
 import re
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,6 +25,7 @@ def _reset_caches():
     # lru_cache for _discover_homebrew_node_dirs
     if hasattr(bt._discover_homebrew_node_dirs, "cache_clear"):
         bt._discover_homebrew_node_dirs.cache_clear()
+    bt._framed_sessions.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -214,6 +219,16 @@ class TestTruncateSnapshot:
             if line.strip() and "truncated" not in line.lower():
                 assert line.startswith("- item") or line == ""
 
+    def test_long_snapshot_keeps_complete_tail_lines(self):
+        from tools.browser_tool import _truncate_snapshot
+
+        lines = [f"- line {i}" for i in range(100)]
+        result = _truncate_snapshot("\n".join(lines), max_chars=200)
+
+        assert "omitted from the middle" in result.lower()
+        assert lines[-1] in result
+        assert result.splitlines()[-1] == lines[-1]
+
 
     def test_stored_snapshot_is_secret_redacted(self):
         """Page-rendered secrets must not land unmasked on disk."""
@@ -245,6 +260,125 @@ class TestTruncateSnapshot:
         assert result.startswith("Summary with button")
         assert "Full snapshot" in result
         assert "read_file" in result
+
+
+# ---------------------------------------------------------------------------
+# Iframe workflow
+# ---------------------------------------------------------------------------
+
+class TestBrowserFrame:
+    def test_is_registered_and_exposed(self):
+        from tools.registry import registry
+        from toolsets import TOOLSETS, _HERMES_CORE_TOOLS
+        from tools.browser_tool import BROWSER_TOOL_SCHEMAS
+
+        assert "browser_frame" in _HERMES_CORE_TOOLS
+        assert "browser_frame" in TOOLSETS["browser"]["tools"]
+        assert "browser_frame" in {item["name"] for item in BROWSER_TOOL_SCHEMAS}
+        assert registry.get_entry("browser_frame") is not None
+
+    def test_routes_normalized_ref_and_records_page_identity(self):
+        import tools.browser_tool as bt
+
+        commands = []
+
+        def run(task, command, args, **_kwargs):
+            commands.append((task, command, args))
+            if command == "get" and args == ["attr", "@e2", "src"]:
+                return {"success": True, "data": {"value": "https://example.com/frame"}}
+            return {"success": True}
+
+        with (
+            patch.object(bt, "_is_camofox_mode", return_value=False),
+            patch.object(bt, "_last_session_key", return_value="session"),
+            patch.object(bt, "_browser_page_url", return_value="https://example.com/top"),
+            patch.object(bt, "_run_browser_command", side_effect=run),
+            patch.object(bt, "_loaded_frame_policy_error", return_value=None),
+            patch.object(bt, "_is_safe_url", return_value=True),
+            patch.object(bt, "check_website_access", return_value=None),
+        ):
+            result = json.loads(bt.browser_frame("e2"))
+
+        assert result["success"] is True
+        assert commands[-1] == ("session", "frame", ["@e2"])
+        assert bt._framed_sessions == {"session": "https://example.com/top"}
+
+    def test_blocks_metadata_source_before_switch(self):
+        import tools.browser_tool as bt
+
+        run = MagicMock(
+            return_value={"success": True, "data": {"value": "http://169.254.169.254/latest"}}
+        )
+        with (
+            patch.object(bt, "_is_camofox_mode", return_value=False),
+            patch.object(bt, "_last_session_key", return_value="session"),
+            patch.object(bt, "_browser_page_url", return_value="https://example.com/top"),
+            patch.object(bt, "_run_browser_command", run),
+            patch.object(bt, "_is_always_blocked_url", return_value=True),
+        ):
+            result = json.loads(bt.browser_frame("@e2"))
+
+        assert result["success"] is False
+        assert "metadata" in result["error"].lower()
+        assert all(call.args[1] != "frame" for call in run.call_args_list)
+
+    def test_failed_policy_reset_retains_guard_for_next_snapshot(self):
+        import tools.browser_tool as bt
+
+        def run(_task, command, args, **_kwargs):
+            if command == "get" and args == ["attr", "@e2", "src"]:
+                return {"success": True, "data": {"value": "about:blank"}}
+            if command == "frame":
+                return {"success": args != ["main"]}
+            return {"success": True}
+
+        with (
+            patch.object(bt, "_is_camofox_mode", return_value=False),
+            patch.object(bt, "_last_session_key", return_value="session"),
+            patch.object(bt, "_browser_page_url", return_value="https://example.com/top"),
+            patch.object(bt, "_run_browser_command", side_effect=run),
+            patch.object(
+                bt,
+                "_loaded_frame_policy_error",
+                return_value="Blocked: loaded iframe targets a cloud metadata endpoint",
+            ) as policy,
+        ):
+            switched = json.loads(bt.browser_frame("@e2"))
+            snapshot = json.loads(bt.browser_snapshot())
+
+        assert switched["success"] is False
+        assert snapshot["success"] is False
+        assert policy.call_count == 2
+        assert "session" in bt._framed_sessions
+
+    def test_stale_page_identity_resets_to_main_before_snapshot(self):
+        import tools.browser_tool as bt
+
+        bt._framed_sessions["session"] = "https://old.example/"
+        commands = []
+
+        def run(task, command, args, **_kwargs):
+            commands.append((task, command, args))
+            if command == "frame":
+                return {"success": True}
+            if command == "snapshot":
+                return {"success": True, "data": {"snapshot": "ok", "refs": {}}}
+            return {"success": True}
+
+        with (
+            patch.object(bt, "_is_camofox_mode", return_value=False),
+            patch.object(bt, "_last_session_key", return_value="session"),
+            patch.object(bt, "_browser_page_url", return_value="https://new.example/"),
+            patch.object(bt, "_run_browser_command", side_effect=run),
+        ):
+            result = json.loads(bt.browser_snapshot())
+
+        assert result["success"] is True
+        assert commands[:2] == [
+            ("session", "frame", ["main"]),
+            ("session", "snapshot", ["-c"]),
+        ]
+        assert "session" not in bt._framed_sessions
 
 
 # ---------------------------------------------------------------------------
@@ -300,3 +434,58 @@ class TestCamofoxEvalFix:
         assert "json_data=" not in src, \
             "_camofox_eval should use body= kwarg for _post, not json_data="
         assert "body=" in src
+
+
+class _FrameProbeHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = (
+            b'<iframe title="probe" src="/frame"></iframe>'
+            if self.path == "/"
+            else b"<h1>FRAME_REAL_DRIVER_OK</h1>"
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        del format, args
+
+
+@pytest.mark.integration
+@pytest.mark.live_system_guard_bypass
+@pytest.mark.skipif(
+    os.environ.get("HERMES_E2E_BROWSER") != "1",
+    reason="real-browser E2E: set HERMES_E2E_BROWSER=1 to opt in",
+)
+def test_browser_frame_real_driver_roundtrip():
+    import tools.browser_tool as bt
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _FrameProbeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    task_id = f"frame-e2e-{os.getpid()}"
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    try:
+        navigated = json.loads(bt.browser_navigate(url, task_id=task_id))
+        assert navigated["success"] is True
+        assert "Iframe" in navigated["snapshot"]
+
+        entered = json.loads(bt.browser_frame("@e1", task_id=task_id))
+        assert entered["success"] is True
+        child = json.loads(bt.browser_snapshot(task_id=task_id))
+        assert child["success"] is True
+        assert "FRAME_REAL_DRIVER_OK" in child["snapshot"]
+        assert "Iframe" not in child["snapshot"]
+
+        reset = json.loads(bt.browser_frame("main", task_id=task_id))
+        assert reset["success"] is True
+        parent = json.loads(bt.browser_snapshot(task_id=task_id))
+        assert parent["success"] is True
+        assert "Iframe" in parent["snapshot"]
+    finally:
+        bt.cleanup_browser(task_id)
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

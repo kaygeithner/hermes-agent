@@ -77,6 +77,42 @@ def test_blank_memory_provider_does_not_auto_enable_honcho():
     save_config.assert_not_called()
 
 
+def test_skip_memory_provider_keeps_builtin_memory_only():
+    cfg = {
+        "memory": {
+            "provider": "recording",
+            "memory_enabled": True,
+            "user_profile_enabled": True,
+        },
+        "agent": {},
+    }
+
+    with (
+        patch("hermes_cli.config.load_config", return_value=cfg),
+        patch("hermes_cli.config.load_config_readonly", return_value=cfg),
+        patch("plugins.memory.load_memory_provider") as load_memory_provider,
+        patch("tools.memory_tool.MemoryStore") as memory_store,
+        patch("agent.model_metadata.get_model_context_length", return_value=204_800),
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=False,
+            skip_memory_provider=True,
+        )
+
+    assert agent._memory_store is memory_store.return_value
+    assert agent._memory_manager is None
+    load_memory_provider.assert_not_called()
+
+
 def test_close_shuts_down_memory_provider():
     from unittest.mock import MagicMock
 

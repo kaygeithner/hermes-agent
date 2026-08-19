@@ -1603,6 +1603,9 @@ def _socket_safe_tmpdir() -> str:
 # Stores: session_name (always), bb_session_id + cdp_url (cloud mode only)
 _active_sessions: Dict[str, Dict[str, Any]] = {}  # session_key -> {session_name, ...}
 _recording_sessions: set = set()  # session_keys with active recordings
+# session_key -> top-page URL captured when agent-browser entered a child frame.
+# Keeping the URL prevents stale frame state from leaking across navigations/tabs.
+_framed_sessions: Dict[str, str] = {}
 
 # Tracks the most recent session_key used per task_id. Set by browser_navigate()
 # after it chooses a backend for a URL; read by every non-nav browser tool
@@ -1733,6 +1736,7 @@ def _emergency_cleanup_all_sessions():
                 _active_sessions.clear()
                 _session_last_activity.clear()
                 _recording_sessions.clear()
+                _framed_sessions.clear()
 
     # Sweep orphans from other crashed hermes processes.  Safe even if we
     # never used the browser — uses owner_pid liveness to avoid reaping
@@ -2190,6 +2194,20 @@ BROWSER_TOOL_SCHEMAS = [
             },
             "required": ["ref"]
         }
+    },
+    {
+        "name": "browser_frame",
+        "description": "Switch the browser context into an iframe, or back to the main page. Use when browser_snapshot shows bare 'Iframe [ref=eN]' nodes: enter that ref, then call browser_snapshot again. Call with 'main' to return to the top page.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "Iframe ref (for example '@e2') or 'main'",
+                }
+            },
+            "required": ["target"],
+        },
     },
     {
         "name": "browser_type",
@@ -3204,48 +3222,42 @@ def _extract_relevant_content(
 
 
 def _truncate_snapshot(snapshot_text: str, max_chars: int = SNAPSHOT_SUMMARIZE_THRESHOLD) -> str:
-    """Structure-aware truncation for snapshots.
-
-    Cuts at line boundaries so that accessibility tree elements are never
-    split mid-line. The full snapshot is saved to cache/web (same pattern as
-    web_extract's truncate-and-store) and the appended note tells the agent
-    exactly where the complete text lives and how to page through it with
-    read_file — element refs beyond the cut are in the file, not lost.
-
-    Args:
-        snapshot_text: The snapshot text to truncate
-        max_chars: Maximum characters to keep
-
-    Returns:
-        Truncated text with a stored-full-text pointer if truncated
-    """
+    """Keep complete head/tail lines and persist the full snapshot."""
     if len(snapshot_text) <= max_chars:
         return snapshot_text
 
     stored_path = _store_full_snapshot(snapshot_text)
+    lines = snapshot_text.split("\n")
+    tail_budget = min(1800, max_chars // 4)
+    note_budget = min(180 + len(stored_path or ""), max_chars // 2)
+    head_budget = max(0, max_chars - tail_budget - note_budget)
 
-    lines = snapshot_text.split('\n')
-    result: list[str] = []
+    head: list[str] = []
     chars = 0
-    # Reserve space for the truncation note (the stored-path variant is the
-    # longer of the two). Clamp so tiny max_chars values still keep content.
-    reserve = min(110 + len(stored_path or ""), max_chars // 2)
     for line in lines:
-        if chars + len(line) + 1 > max_chars - reserve:
+        if chars + len(line) + 1 > head_budget:
             break
-        result.append(line)
+        head.append(line)
         chars += len(line) + 1
-    remaining = len(lines) - len(result)
-    if remaining > 0:
-        if stored_path:
-            next_line = len(result) + 1
-            result.append(
-                f'\n[... {remaining} more lines truncated — full snapshot: '
-                f'read_file path="{stored_path}" offset={next_line} limit=200]'
-            )
-        else:
-            result.append(f'\n[... {remaining} more lines truncated, use browser_snapshot for full content]')
-    return '\n'.join(result)
+
+    tail: list[str] = []
+    chars = 0
+    for line in reversed(lines[len(head):]):
+        if chars + len(line) + 1 > tail_budget:
+            break
+        tail.insert(0, line)
+        chars += len(line) + 1
+
+    omitted = len(lines) - len(head) - len(tail)
+    if stored_path:
+        note = (
+            f'\n[truncated: {omitted} lines omitted from the MIDDLE; full: '
+            f'read_file path="{stored_path}" offset={len(head) + 1} limit=200; '
+            'END follows]\n'
+        )
+    else:
+        note = f"\n[truncated: {omitted} lines omitted from the MIDDLE; END follows]\n"
+    return "\n".join(head) + note + "\n".join(tail)
 
 
 def _redact_browser_output(value: Any) -> Any:
@@ -3474,6 +3486,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         # Failed opens and blocked redirects must not retarget follow-up clicks
         # or snapshots to a newly-created but irrelevant session.
         _last_active_session_key[effective_task_id] = nav_session_key
+        _framed_sessions.pop(nav_session_key, None)
         _copy_fallback_warning(response, result)
 
         # Detect common "blocked" page patterns from title/url
@@ -3551,6 +3564,34 @@ def browser_snapshot(
         return camofox_snapshot(full, task_id, user_task)
 
     effective_task_id = _last_session_key(task_id or "default")
+
+    expected_page = _framed_sessions.get(effective_task_id)
+    if expected_page is not None:
+        current_page = _browser_page_url(effective_task_id)
+        if not current_page:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "Blocked: could not verify the iframe's top-page identity",
+                }
+            )
+        if current_page != expected_page:
+            reset = _run_browser_command(effective_task_id, "frame", ["main"])
+            if not reset.get("success"):
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": "Blocked: stale iframe context could not be reset",
+                    }
+                )
+            _framed_sessions.pop(effective_task_id, None)
+        else:
+            blocked = _loaded_frame_policy_error(effective_task_id)
+            if blocked:
+                reset = _run_browser_command(effective_task_id, "frame", ["main"])
+                if reset.get("success"):
+                    _framed_sessions.pop(effective_task_id, None)
+                return json.dumps({"success": False, "error": blocked})
 
     # Build command args based on full flag
     args = []
@@ -3668,6 +3709,159 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
             "error": result.get("error", f"Failed to click {ref}")
         }
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+
+
+def _browser_page_url(session_key: str) -> str:
+    result = _run_browser_command(session_key, "get", ["url"])
+    data = result.get("data") or {}
+    if not result.get("success"):
+        return ""
+    return str(data.get("url") or data.get("value") or "").strip()
+
+
+def _loaded_frame_policy_error(session_key: str) -> Optional[str]:
+    """Return an error when a loaded child-frame URL cannot be proved safe."""
+    try:
+        cdp = _run_browser_command(session_key, "get", ["cdp-url"])
+        cdp_url = str((cdp.get("data") or {}).get("cdpUrl") or "")
+        page_url = _browser_page_url(session_key)
+        if not cdp.get("success") or not cdp_url or not page_url:
+            raise RuntimeError("CDP endpoint or top-page URL unavailable")
+
+        from tools.browser_cdp_tool import _cdp_call, _run_async
+
+        infos = _run_async(_cdp_call(cdp_url, "Target.getTargets", {}, None, 10.0))[
+            "targetInfos"
+        ]
+        pages = [info for info in infos if info.get("type") == "page"]
+        matches = [info for info in pages if info.get("url") == page_url]
+        if len(matches) == 1:
+            target_id = matches[0]["targetId"]
+        elif len(pages) == 1:
+            target_id = pages[0]["targetId"]
+        else:
+            raise RuntimeError("active page target is ambiguous")
+        tree = _run_async(
+            _cdp_call(cdp_url, "Page.getFrameTree", {}, target_id, 10.0)
+        )["frameTree"]
+
+        urls: list[str] = []
+
+        def collect(node: Dict[str, Any]) -> None:
+            for child in node.get("childFrames") or []:
+                urls.append(str((child.get("frame") or {}).get("url") or "").strip())
+                collect(child)
+
+        collect(tree)
+        if not urls:
+            raise RuntimeError("loaded child frame was not present in the CDP frame tree")
+        for url in urls:
+            if not url:
+                raise RuntimeError("loaded child frame URL is empty")
+            if url.startswith(("about:", "data:")):
+                continue
+            if _is_always_blocked_url(url):
+                return "Blocked: loaded iframe targets a cloud metadata endpoint"
+            if not _is_local_backend() and not _allow_private_urls() and not _is_safe_url(url):
+                return "Blocked: loaded iframe targets a private or internal address"
+            policy = check_website_access(url)
+            if policy:
+                return policy["message"]
+        return None
+    except Exception as exc:
+        logger.warning("Could not verify loaded iframe URL via CDP: %s", exc)
+        return "Blocked: could not verify the loaded iframe's final URL"
+
+
+def browser_frame(target: str, task_id: Optional[str] = None) -> str:
+    """Switch agent-browser into an iframe ref, or back to the main page."""
+    if _is_camofox_mode():
+        return json.dumps(
+            {"success": False, "error": "frame switching is not supported in camofox mode"}
+        )
+
+    session_key = _last_session_key(task_id or "default")
+    normalized = (target or "").strip()
+    if not normalized:
+        return json.dumps({"success": False, "error": "frame target is required"})
+    if normalized != "main" and not normalized.startswith("@"):
+        normalized = f"@{normalized}"
+
+    page_url = ""
+    if normalized != "main":
+        page_url = _browser_page_url(session_key)
+        if not page_url:
+            return json.dumps(
+                {"success": False, "error": "Blocked: could not verify the top-page URL"}
+            )
+        src_result = _run_browser_command(session_key, "get", ["attr", normalized, "src"])
+        if not src_result.get("success"):
+            return json.dumps(
+                {"success": False, "error": "Blocked: could not verify iframe URL before switching"}
+            )
+        src = str((src_result.get("data") or {}).get("value") or "").strip()
+        if src and not src.startswith(("about:", "data:")):
+            from urllib.parse import urljoin, urlparse
+
+            if not urlparse(src).scheme:
+                src = urljoin(page_url, src)
+            if _is_always_blocked_url(src):
+                return json.dumps(
+                    {"success": False, "error": "Blocked: iframe targets a cloud metadata endpoint"}
+                )
+            if not _is_local_backend() and not _allow_private_urls() and not _is_safe_url(src):
+                return json.dumps(
+                    {"success": False, "error": "Blocked: iframe targets a private or internal address"}
+                )
+            policy = check_website_access(src)
+            if policy:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": policy["message"],
+                        "blocked_by_policy": {
+                            "host": policy["host"],
+                            "rule": policy["rule"],
+                            "source": policy["source"],
+                        },
+                    }
+                )
+
+    result = _run_browser_command(session_key, "frame", [normalized])
+    if not result.get("success"):
+        return json.dumps(
+            _copy_fallback_warning(
+                {
+                    "success": False,
+                    "error": result.get("error", f"Failed to switch frame to {normalized}"),
+                },
+                result,
+            ),
+            ensure_ascii=False,
+        )
+
+    if normalized == "main":
+        _framed_sessions.pop(session_key, None)
+    else:
+        _framed_sessions[session_key] = page_url
+        blocked = _loaded_frame_policy_error(session_key)
+        if blocked:
+            reset = _run_browser_command(session_key, "frame", ["main"])
+            if reset.get("success"):
+                _framed_sessions.pop(session_key, None)
+            return json.dumps({"success": False, "error": blocked})
+
+    return json.dumps(
+        _copy_fallback_warning(
+            {
+                "success": True,
+                "frame": normalized,
+                "note": "Context switched. Call browser_snapshot to see this frame's content.",
+            },
+            result,
+        ),
+        ensure_ascii=False,
+    )
 
 
 def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
@@ -4930,6 +5124,7 @@ def _cleanup_single_browser_session(task_id: str) -> None:
     # Stop the CDP supervisor for this task FIRST so we close our WebSocket
     # before the backend tears down the underlying CDP endpoint.
     _stop_cdp_supervisor(task_id)
+    _framed_sessions.pop(task_id, None)
 
     # Also clean up Camofox session if running in Camofox mode.
     # Skip full close when managed persistence is enabled — the browser
@@ -4980,6 +5175,7 @@ def _cleanup_single_browser_session(task_id: str) -> None:
         with _cleanup_lock:
             _active_sessions.pop(task_id, None)
             _session_last_activity.pop(task_id, None)
+            _framed_sessions.pop(task_id, None)
 
         # Cloud mode: close the cloud browser session via provider API.
         # Local sidecars have bb_session_id=None so this no-ops for them.
@@ -5407,6 +5603,16 @@ registry.register(
     handler=lambda args, **kw: browser_click(ref=args.get("ref", ""), task_id=kw.get("task_id")),
     check_fn=check_browser_requirements,
     emoji="👆",
+)
+registry.register(
+    name="browser_frame",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_frame"],
+    handler=lambda args, **kw: browser_frame(
+        target=args.get("target", ""), task_id=kw.get("task_id")
+    ),
+    check_fn=check_browser_requirements,
+    emoji="🖼️",
 )
 registry.register(
     name="browser_type",

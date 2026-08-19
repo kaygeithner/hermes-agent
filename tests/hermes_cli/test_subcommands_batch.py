@@ -77,6 +77,17 @@ SINGLE_HANDLER_CASES = [
 
 
 
+def test_backup_compression_option_parses():
+    parser = argparse.ArgumentParser(prog="hermes")
+    sub = parser.add_subparsers(dest="command")
+    handler = _h("backup")
+    build_backup_parser(sub, cmd_backup=handler)
+
+    assert parser.parse_args(["backup"]).compression == "deflated"
+    ns = parser.parse_args(["backup", "--compression", "stored"])
+    assert ns.func is handler
+    assert ns.compression == "stored"
+
 
 def test_config_get_unset_subcommands_parse():
     """`hermes config get/unset` parse key args (and --json for get)."""

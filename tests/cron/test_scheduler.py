@@ -650,6 +650,21 @@ class TestRunJobSessionPersistence:
         assert kwargs["enabled_toolsets"] == ["memory", "file"]
         assert "memory" in kwargs["disabled_toolsets"]
 
+    def test_run_job_can_opt_in_to_builtin_memory_without_provider(self, tmp_path):
+        job = {
+            "id": "memory-writer",
+            "name": "test",
+            "prompt": "hello",
+            "allow_memory_writes": True,
+        }
+        with self._run_job_patches(tmp_path) as (_fake_db, mock_agent_cls):
+            run_job(job)
+
+        kwargs = mock_agent_cls.call_args.kwargs
+        assert kwargs["skip_memory"] is False
+        assert kwargs["skip_memory_provider"] is True
+        assert "memory" not in kwargs["disabled_toolsets"]
+
     def test_tick_skips_due_jobs_while_dispatch_is_paused(self, tmp_path):
         """The drain gate runs before advancing a due job's schedule."""
         from cron.scheduler import tick

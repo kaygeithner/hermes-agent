@@ -7,8 +7,8 @@ default off) makes that denial opt-out-able:
 
   - gate off / absent: byte-exact current behavior — ``cronjob`` denied.
   - gate on: ``cronjob`` dropped from the base denylist; ``messaging`` and
-    ``clarify`` (interactivity constraints) and ``memory`` (cron agents run
-    with skip_memory=True) are ALWAYS denied regardless of the gate.
+    ``clarify`` (interactivity constraints) and ``memory`` (unless a job has
+    the separate explicit memory-write opt-in) remain denied.
   - user-level ``agent.disabled_toolsets`` still layers on top, so a user who
     denies ``cronjob`` globally keeps it denied even with the gate on
     (per-job enabled_toolsets can never widen past the config denylist).
@@ -65,6 +65,14 @@ class TestGateOn:
         disabled = _resolve_cron_disabled_toolsets(cfg)
         for name in ALWAYS_DISABLED:
             assert name in disabled
+
+    def test_memory_write_opt_in_only_removes_memory_denial(self):
+        cfg = {"cron": {"allow_agent_scheduling": False}}
+        disabled = _resolve_cron_disabled_toolsets(cfg, allow_memory_writes=True)
+        assert "memory" not in disabled
+        assert "cronjob" in disabled
+        assert "messaging" in disabled
+        assert "clarify" in disabled
 
     def test_user_denylist_wins_over_gate(self):
         # A user who denies cronjob in agent.disabled_toolsets keeps it

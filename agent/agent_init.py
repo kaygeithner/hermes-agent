@@ -555,6 +555,7 @@ def init_agent(
     skip_context_files: bool = False,
     load_soul_identity: bool = False,
     skip_memory: bool = False,
+    skip_memory_provider: bool = False,
     skip_background_review: bool = False,
     session_db=None,
     parent_session_id: str = None,
@@ -1768,7 +1769,7 @@ def init_agent(
     # "memory" toolset it still needs the built-in file-backed store — otherwise
     # the memory tool dispatches with store=None and every call fails (#65429).
     # So the built-in store is created unless memory is globally disabled, while
-    # the external-provider block below stays gated on skip_memory.
+    # the external-provider block below stays separately gated.
     _memory_toolset_requested = "memory" in (agent.enabled_toolsets or [])
     if not skip_memory or _memory_toolset_requested:
         try:
@@ -1791,7 +1792,7 @@ def init_agent(
     # Memory provider plugin (external — one at a time, alongside built-in)
     # Reads memory.provider from config to select which plugin to activate.
     agent._memory_manager = None
-    if not skip_memory:
+    if not skip_memory and not skip_memory_provider:
         try:
             _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
 
