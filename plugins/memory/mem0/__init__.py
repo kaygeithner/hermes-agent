@@ -859,9 +859,9 @@ class Mem0MemoryProvider(MemoryProvider):
                                 attempts, e)
                             self._deadletter_mutate(remove=[line])
                             continue
-                        # ponytail: attempts can tick up on the oldest entry
-                        # during a flaky-backend window (sync succeeded, replay
-                        # add failed) — 8 healthy-sync failures before calling
+                        # Attempts can tick up on the oldest entry during a
+                        # flaky-backend window (sync succeeded, replay add
+                        # failed): allow 8 healthy-sync failures before calling
                         # one turn poisoned is the accepted ceiling
                         entry["attempts"] = attempts
                         self._deadletter_mutate(
@@ -891,9 +891,9 @@ class Mem0MemoryProvider(MemoryProvider):
         hint mem0's LLM update can regress a fresh fact to the stale one.
         Fresh replays (busy-skip, seconds old) pass through byte-identical.
         """
-        # ponytail: content annotation because OSS Memory.add rejects the
-        # timestamp param (platform-only); switch to timestamp= if OSS mem0
-        # ever supports it or the annotation proves too weak
+        # Use content annotation because OSS Memory.add rejects the timestamp
+        # param (platform-only); switch to timestamp= if OSS mem0 supports it
+        # later or the annotation proves too weak.
         if not messages:
             return messages
         if ts and (time.time() - ts) <= _DEADLETTER_ANNOTATE_AGE_SECS:

@@ -25,6 +25,24 @@ class RecordingMemoryProvider:
         pass
 
 
+def test_shutdown_memory_provider_is_idempotent():
+    from unittest.mock import MagicMock
+
+    from run_agent import AIAgent
+
+    manager = MagicMock()
+    agent = object.__new__(AIAgent)
+    agent._memory_manager = manager
+    agent.context_compressor = None
+    agent.session_id = "session-1"
+
+    agent.shutdown_memory_provider([{"role": "user", "content": "one"}])
+    agent.shutdown_memory_provider([{"role": "user", "content": "two"}])
+
+    manager.on_session_end.assert_called_once()
+    manager.shutdown_all.assert_called_once()
+
+
 def test_blank_memory_provider_does_not_auto_enable_honcho():
     """Blank memory.provider should remain opt-out even if Honcho fallback looks configured."""
     cfg = {"memory": {"provider": ""}, "agent": {}}
@@ -59,21 +77,21 @@ def test_blank_memory_provider_does_not_auto_enable_honcho():
     save_config.assert_not_called()
 
 
-def test_builtin_memory_can_load_while_external_provider_is_skipped(tmp_path):
-    provider = RecordingMemoryProvider()
+def test_skip_memory_provider_keeps_builtin_memory_only():
     cfg = {
         "memory": {
+            "provider": "recording",
             "memory_enabled": True,
             "user_profile_enabled": True,
-            "provider": "recording",
         },
         "agent": {},
     }
 
     with (
         patch("hermes_cli.config.load_config", return_value=cfg),
-        patch("tools.memory_tool.get_memory_dir", return_value=tmp_path / "memories"),
-        patch("plugins.memory.load_memory_provider", return_value=provider) as load_provider,
+        patch("hermes_cli.config.load_config_readonly", return_value=cfg),
+        patch("plugins.memory.load_memory_provider") as load_memory_provider,
+        patch("tools.memory_tool.MemoryStore") as memory_store,
         patch("agent.model_metadata.get_model_context_length", return_value=204_800),
         patch("run_agent.get_tool_definitions", return_value=[]),
         patch("run_agent.check_toolset_requirements", return_value={}),
@@ -88,12 +106,27 @@ def test_builtin_memory_can_load_while_external_provider_is_skipped(tmp_path):
             skip_context_files=True,
             skip_memory=False,
             skip_memory_provider=True,
-            platform="cron",
         )
 
-    assert getattr(agent, "_memory_store", None) is not None
-    assert getattr(agent, "_memory_manager", None) is None
-    load_provider.assert_not_called()
+    assert agent._memory_store is memory_store.return_value
+    assert agent._memory_manager is None
+    load_memory_provider.assert_not_called()
+
+
+def test_close_shuts_down_memory_provider():
+    from unittest.mock import MagicMock
+
+    from run_agent import AIAgent
+
+    agent = object.__new__(AIAgent)
+    agent._memory_manager = MagicMock()
+    agent.context_compressor = None
+    agent.session_id = ""
+    agent._session_messages = []
+
+    agent.close()
+
+    agent._memory_manager.shutdown_all.assert_called_once()
 
 
 def test_aiagent_forwards_user_id_alt_to_memory_provider():

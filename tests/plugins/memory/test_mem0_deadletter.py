@@ -1,9 +1,12 @@
 """Tests for the mem0 dead-letter queue and current-turn prefetch."""
 
 import json
+import multiprocessing
 import os
 import threading
 import time
+
+import pytest
 
 from plugins.memory.mem0 import Mem0MemoryProvider, _DEADLETTER_MAX
 
@@ -496,3 +499,135 @@ def test_reinitialize_discards_late_prefetch_result(tmp_path, monkeypatch):
     assert p._consecutive_failures == 3
     assert p._prefetch_result == ""
     assert p._prefetch_done is False
+
+
+# These workers deliberately stop on a durability boundary. They stay at module
+# scope so multiprocessing can launch them without pickling test closures.
+def _park_forever():
+    while True:
+        time.sleep(1)
+
+
+def _append_boundary_worker(home, ready):
+    os.environ["HERMES_HOME"] = home
+    p = Mem0MemoryProvider()
+    p._config = {"mode": "oss", "oss": {}}
+    p._mode = "oss"
+    p._hermes_home = home
+    real_fsync_parent = p._fsync_parent
+
+    def pause_after_content_fsync(path):
+        if os.fspath(path).endswith("mem0-deadletter.jsonl"):
+            ready.set()
+            _park_forever()
+        real_fsync_parent(path)
+
+    p._fsync_parent = pause_after_content_fsync
+    try:
+        p._deadletter_append("append boundary", "answer")
+    finally:
+        p._fsync_parent = real_fsync_parent
+
+
+def _rewrite_boundary_worker(home, ready):
+    os.environ["HERMES_HOME"] = home
+    from plugins.memory import mem0 as mem0_mod
+
+    p = Mem0MemoryProvider()
+    p._hermes_home = home
+    path = p._deadletter_path()
+    real_replace = mem0_mod.atomic_replace
+
+    def pause_after_replace(source, destination):
+        real_replace(source, destination)
+        ready.set()
+        _park_forever()
+
+    mem0_mod.atomic_replace = pause_after_replace
+    p._deadletter_write(
+        path,
+        [json.dumps({"ts": 2, "messages": [{"role": "user", "content": "new"}]})],
+    )
+
+
+def _replay_boundary_worker(home, ready, receipt):
+    os.environ["HERMES_HOME"] = home
+
+    class BlockingBackend(FakeBackend):
+        def add(self, messages, **kwargs):
+            fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(messages[0]["content"])
+                stream.flush()
+                os.fsync(stream.fileno())
+            ready.set()
+            _park_forever()
+            return {}
+
+    p = Mem0MemoryProvider()
+    p._config = {"mode": "oss", "oss": {}}
+    p._mode = "oss"
+    p._hermes_home = home
+    backend = BlockingBackend()
+    setattr(p, "_backend", backend)
+    p._deadletter_replay(backend)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="forced-termination durability gate is POSIX-only")
+def test_forced_termination_preserves_append_and_rewrite_boundaries(tmp_path):
+    ctx = multiprocessing.get_context("fork")
+    home = os.fspath(tmp_path)
+    path = _deadletter(tmp_path)
+
+    # Append has fsynced the complete JSONL record before the child is killed.
+    ready = ctx.Event()
+    proc = ctx.Process(target=_append_boundary_worker, args=(home, ready))
+    proc.start()
+    assert ready.wait(timeout=10)
+    proc.kill()
+    proc.join(timeout=10)
+    assert not proc.is_alive()
+    lines = path.read_text(encoding="utf-8").split("\n")
+    entries = [json.loads(line) for line in lines if line]
+    assert entries[0]["messages"][0]["content"] == "append boundary"
+    assert path.stat().st_mode & 0o777 == 0o600
+
+    # Rewrite has atomically replaced the queue before the child is killed.
+    ready = ctx.Event()
+    proc = ctx.Process(target=_rewrite_boundary_worker, args=(home, ready))
+    proc.start()
+    assert ready.wait(timeout=10)
+    proc.kill()
+    proc.join(timeout=10)
+    assert not proc.is_alive()
+    rewritten = [json.loads(line) for line in path.read_text().split("\n") if line]
+    assert rewritten[0]["messages"][0]["content"] == "new"
+    assert not path.with_suffix(".jsonl.tmp").exists()
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="forced-termination durability gate is POSIX-only")
+def test_forced_termination_during_replay_keeps_queue_recoverable(tmp_path, monkeypatch):
+    ctx = multiprocessing.get_context("fork")
+    home = os.fspath(tmp_path)
+    receipt = os.fspath(tmp_path / "backend-receipt")
+    p = _provider(tmp_path, monkeypatch, FakeBackend())
+    assert p._deadletter_append("replay boundary", "answer")
+
+    ready = ctx.Event()
+    proc = ctx.Process(target=_replay_boundary_worker, args=(home, ready, receipt))
+    proc.start()
+    assert ready.wait(timeout=10)
+    proc.kill()
+    proc.join(timeout=10)
+    assert not proc.is_alive()
+
+    # Backend side effect may have happened, so replay is intentionally
+    # at-least-once. The local queue must remain valid and drain on retry.
+    assert os.path.exists(receipt)
+    json.loads(_deadletter(tmp_path).read_text().split("\n", 1)[0])
+    backend = FakeBackend()
+    setattr(p, "_backend", backend)
+    p._deadletter_replay(backend)
+    assert backend.added[0][0]["content"] == "replay boundary"
+    assert _drained(tmp_path)
