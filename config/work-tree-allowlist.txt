@@ -4,12 +4,12 @@
 # the agent's work/ tree. The weekly placement watchdog (check-work-tree.py)
 # reads this file and flags any unlisted top-level entry as drift.
 #
-# ADDING A DOSSIER REQUIRES A HUMAN-AUTHORED COMMIT ON THE MAC. The agent must
-# not edit this file to self-approve a new folder; if a new dossier is genuinely
-# needed, a human adds a line here and commits. Lines starting with '#' are
-# comments; blank lines are ignored. One dossier name per line.
-# Do not add transient caches. The staging/runtime roots below were explicitly
-# approved by Kay on 2026-08-11.
+# ADDING A DOSSIER REQUIRES KAY'S EXPLICIT APPROVAL. The agent must not edit
+# this file to self-approve a new folder. After Kay approves a permanent root,
+# record it here in a scoped commit. Lines starting with '#' are comments;
+# blank lines are ignored. One dossier name per line.
+# Do not add transient caches. Staging/runtime roots were approved by Kay on
+# 2026-08-11; Neon Strike was approved as an active project on 2026-08-24.
 apmt-work-intelligence
 archive
 browser-harness
@@ -21,6 +21,7 @@ graphiti-pilot
 head-ade-application
 hermes-context-audits
 hermes-ops
+neon-strike
 personal-admin-finance-vendors
 research
 scratch
