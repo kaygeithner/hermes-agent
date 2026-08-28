@@ -77,6 +77,15 @@ _DISCORD_NONCONVERSATIONAL_STATE_FILENAME = "discord_nonconversational_messages.
 
 _DISCORD_COMMAND_SYNC_MUTATION_INTERVAL_SECONDS = 4.5
 _DISCORD_COMMAND_SYNC_MAX_RATE_LIMIT_SLEEP_SECONDS = 30.0
+
+# Discord's typing bubble lasts ~10s; send_typing() starts a persistent
+# per-channel loop that re-pings the typing endpoint every 12s. stop_typing()
+# normally cancels it when the reply lands, but a run interrupted before that
+# (slow-model generation, session reset/desync) would otherwise leave it pinging
+# Discord forever. A lease guard makes each loop self-terminate once no fresh
+# send_typing() has arrived for this window, so a leaked "typing" ghost dies on
+# its own within ~45s of the run that owned it going away.
+_TYPING_LOOP_STALE_SECS = 45.0
 # Discord enforces a hard cap of 100 global application (slash) commands per
 # app. Registering more makes the ENTIRE sync fail with error 30032
 # ("Maximum number of application commands reached"), which silently breaks
@@ -1113,6 +1122,11 @@ class DiscordAdapter(BasePlatformAdapter):
         # Persistent typing indicator loops per channel (DMs don't reliably
         # show the standard typing gateway event for bots)
         self._typing_tasks: Dict[str, asyncio.Task] = {}
+        # Lease: last send_typing() time per chat. Every call (the run loop
+        # refreshes ~every 2s while a reply is being produced) extends the
+        # lease; a loop whose lease goes stale cannot outlive the run that
+        # spawned it (leak guard — see _TYPING_LOOP_STALE_SECS).
+        self._typing_lease: Dict[str, float] = {}
         self._bot_task: Optional[asyncio.Task] = None
         self._post_connect_task: Optional[asyncio.Task] = None
         # WebSocket-level liveness probe. Discord REST and Gateway are distinct
@@ -5587,17 +5601,35 @@ class DiscordAdapter(BasePlatformAdapter):
         Rate-limit handling: if a 429 is encountered, the loop logs a
         warning, sleeps for the ``retry_after`` duration (or a sensible
         default), and continues — it does NOT die on a single rate-limit
-        hit.  Only CancelledError (from stop_typing) stops the loop.
+        hit.  Only CancelledError (from stop_typing) normally stops the loop.
+
+        Leak guard: every call extends a per-channel lease (the run loop
+        re-calls this every ~2s while a reply is being produced).  The
+        background loop checks that lease each tick and self-terminates once
+        it is older than ``_TYPING_LOOP_STALE_SECS``, so an interrupted run
+        that never reached stop_typing() cannot leave Discord showing
+        "typing..." forever.  The bubble then only ever reflects a reply that
+        is genuinely in flight.
         """
         if not self._client:
             return
+        # Extend the lease even when the loop already exists: as long as the
+        # owning run keeps calling send_typing, the loop must keep pinging.
+        self._typing_lease[chat_id] = asyncio.get_running_loop().time()
         # Don't start a duplicate loop
         if chat_id in self._typing_tasks:
             return
 
         async def _typing_loop() -> None:
+            _loop = asyncio.get_running_loop()
             try:
                 while True:
+                    if _loop.time() - self._typing_lease.get(chat_id, 0.0) > _TYPING_LOOP_STALE_SECS:
+                        logger.debug(
+                            "Discord typing loop self-terminated for %s (no send_typing for >%.0fs)",
+                            chat_id, _TYPING_LOOP_STALE_SECS,
+                        )
+                        return
                     try:
                         route = discord.http.Route(
                             "POST", "/channels/{channel_id}/typing",
