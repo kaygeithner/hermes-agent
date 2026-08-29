@@ -3830,6 +3830,31 @@ def _get_channel_override(
     return None
 
 
+def _channel_override_for_source(
+    config: Optional[GatewayConfig], source: Optional[SessionSource]
+) -> Optional[ChannelOverride]:
+    """Channel override for a message source, or None.
+
+    Mirrors the model-routing lookup in ``_resolve_session_agent_runtime``
+    (exact thread/channel id first, then parent channel/forum id) so display
+    paths like ``/status`` and the ``/reset`` banner report the model a pinned
+    channel will actually run instead of the global default before the first
+    turn persists a route.
+    """
+    if config is None or source is None:
+        return None
+    chat_id = str(source.chat_id) if source.chat_id else ""
+    thread_id = str(getattr(source, "thread_id", None) or "") or None
+    parent_id = str(getattr(source, "parent_chat_id", None) or "") or None
+    return _get_channel_override(
+        config,
+        source.platform,
+        chat_id,
+        thread_id=thread_id,
+        parent_id=parent_id,
+    )
+
+
 def _resolve_hermes_bin() -> Optional[list[str]]:
     """Resolve the Hermes update command as argv parts.
 
@@ -21501,21 +21526,35 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         if getattr(getattr(self, "config", None), "multiplex_profiles", False):
             with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
-                return self._format_session_info()
-        return self._format_session_info()
+                return self._format_session_info(source)
+        return self._format_session_info(source)
 
-    def _format_session_info(self) -> str:
+    def _format_session_info(self, source: Optional[SessionSource] = None) -> str:
         """Resolve current model config and return a formatted info block.
 
         Surfaces model, provider, context length, and endpoint so gateway
         users can immediately see if context detection went wrong (e.g.
         local models falling to the 128K default).
+
+        When ``source`` has a channel/thread override, the advertised model
+        and provider reflect the pinned channel config instead of the global
+        default, so a fresh ``/reset`` here does not claim the wrong model.
         """
         resolved = _resolve_gateway_model_context()
         model = resolved.model
         provider = resolved.provider
         base_url = resolved.base_url
         context_length = resolved.context_length
+
+        try:
+            _ch = _channel_override_for_source(self.config, source)
+        except Exception:
+            _ch = None
+        if _ch is not None:
+            if _ch.model:
+                model = _ch.model
+            if _ch.provider:
+                provider = _ch.provider
 
         # Format context source hint
         if resolved.context_source == "config":

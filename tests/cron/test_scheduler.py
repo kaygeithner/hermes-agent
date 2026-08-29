@@ -632,42 +632,52 @@ class TestRunJobSessionPersistence:
             yield fake_db, mock_agent_cls
 
 
-    def test_run_job_memory_enabled_in_cron(self, tmp_path):
-        """Cron agents get memory like any other agent run.
-
-        skip_memory=False and the memory toolset is not policy-denied, so
-        MEMORY.md/USER.md load and the memory tool follows normal toolset
-        resolution.
-        """
+    def test_run_job_memory_is_disabled_by_default(self, tmp_path):
+        """Cron runs cannot read or write memory unless the job opts in."""
         job = {
-            "id": "memory-enabled-job",
+            "id": "memory-disabled-job",
             "name": "test",
             "prompt": "hello",
         }
-        with self._run_job_patches(tmp_path) as (fake_db, mock_agent_cls):
+        with self._run_job_patches(tmp_path) as (_fake_db, mock_agent_cls):
             run_job(job)
 
         kwargs = mock_agent_cls.call_args.kwargs
-        assert kwargs["skip_memory"] is False
-        assert "memory" not in (kwargs["disabled_toolsets"] or []), (
-            "memory toolset must not be policy-denied in cron"
-        )
+        assert kwargs["skip_memory"] is True
+        assert kwargs["skip_memory_provider"] is True
+        assert "memory" in kwargs["disabled_toolsets"]
 
-    def test_run_job_keeps_per_job_memory_toolset(self, tmp_path):
-        """A per-job enabled_toolsets naming memory keeps it."""
+    def test_enabled_toolset_cannot_bypass_cron_memory_policy(self, tmp_path):
+        """Naming memory as enabled is not the explicit write opt-in."""
         job = {
             "id": "memory-toolset-job",
             "name": "test",
             "prompt": "remember what you learn",
             "enabled_toolsets": ["memory", "file"],
         }
-        with self._run_job_patches(tmp_path) as (fake_db, mock_agent_cls):
+        with self._run_job_patches(tmp_path) as (_fake_db, mock_agent_cls):
+            run_job(job)
+
+        kwargs = mock_agent_cls.call_args.kwargs
+        assert kwargs["skip_memory"] is True
+        assert kwargs["skip_memory_provider"] is True
+        assert "memory" in (kwargs["enabled_toolsets"] or [])
+        assert "file" in (kwargs["enabled_toolsets"] or [])
+        assert "memory" in kwargs["disabled_toolsets"]
+
+    def test_run_job_can_opt_in_to_builtin_memory_without_provider(self, tmp_path):
+        job = {
+            "id": "memory-writer",
+            "name": "test",
+            "prompt": "hello",
+            "allow_memory_writes": True,
+        }
+        with self._run_job_patches(tmp_path) as (_fake_db, mock_agent_cls):
             run_job(job)
 
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["skip_memory"] is False
-        assert "memory" in (kwargs["enabled_toolsets"] or [])
-        assert "file" in (kwargs["enabled_toolsets"] or [])
+        assert kwargs["skip_memory_provider"] is True
         assert "memory" not in kwargs["disabled_toolsets"]
 
     def test_tick_skips_due_jobs_while_dispatch_is_paused(self, tmp_path):

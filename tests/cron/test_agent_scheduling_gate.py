@@ -7,8 +7,8 @@ default off) makes that denial opt-out-able:
 
   - gate off / absent: byte-exact current behavior — ``cronjob`` denied.
   - gate on: ``cronjob`` dropped from the base denylist; ``messaging`` and
-    ``clarify`` (interactivity constraints) are ALWAYS denied regardless of
-    the gate.
+    ``clarify`` (interactivity constraints) and ``memory`` (unless a job has
+    the separate explicit memory-write opt-in) remain denied.
   - user-level ``agent.disabled_toolsets`` still layers on top, so a user who
     denies ``cronjob`` globally keeps it denied even with the gate on
     (per-job enabled_toolsets can never widen past the config denylist).
@@ -21,26 +21,25 @@ from cron.scheduler import _resolve_cron_disabled_toolsets
 
 # The toolsets that must be denied in cron context no matter what the
 # agent-scheduling gate says: messaging/clarify are interactive-only.
-# ``memory`` is intentionally NOT here — cron agents get memory like any
-# other agent run.
+# ``memory`` is separately gated by the per-job operator opt-in.
 ALWAYS_DISABLED = ["messaging", "clarify"]
 
 
 class TestGateOffDefault:
     def test_empty_config_denies_cronjob(self):
         assert _resolve_cron_disabled_toolsets({}) == [
-            "cronjob", "messaging", "clarify",
+            "cronjob", "messaging", "clarify", "memory",
         ]
 
     def test_none_config_denies_cronjob(self):
         assert _resolve_cron_disabled_toolsets(None) == [
-            "cronjob", "messaging", "clarify",
+            "cronjob", "messaging", "clarify", "memory",
         ]
 
     def test_cron_section_present_but_gate_absent(self):
         cfg = {"cron": {"preflight": True}}
         assert _resolve_cron_disabled_toolsets(cfg) == [
-            "cronjob", "messaging", "clarify",
+            "cronjob", "messaging", "clarify", "memory",
         ]
 
     def test_explicit_false_matches_default(self):
@@ -67,11 +66,13 @@ class TestGateOn:
         for name in ALWAYS_DISABLED:
             assert name in disabled
 
-    def test_memory_not_denied(self):
-        # Cron agents run with memory enabled like any other agent run
-        # (skip_memory=False); the toolset must not be policy-denied.
-        for cfg in ({}, {"cron": {"allow_agent_scheduling": True}}):
-            assert "memory" not in _resolve_cron_disabled_toolsets(cfg)
+    def test_memory_write_opt_in_only_removes_memory_denial(self):
+        cfg = {"cron": {"allow_agent_scheduling": False}}
+        disabled = _resolve_cron_disabled_toolsets(cfg, allow_memory_writes=True)
+        assert "memory" not in disabled
+        assert "cronjob" in disabled
+        assert "messaging" in disabled
+        assert "clarify" in disabled
 
     def test_user_denylist_wins_over_gate(self):
         # A user who denies cronjob in agent.disabled_toolsets keeps it
