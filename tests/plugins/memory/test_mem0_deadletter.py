@@ -189,6 +189,56 @@ def test_shutdown_flag_stops_drain_without_attempts_bump(tmp_path, monkeypatch):
     assert "attempts" not in entry
 
 
+def test_reinitialize_cannot_let_old_backend_drain_shared_queue(tmp_path, monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingBackend(FakeBackend):
+        def add(self, messages, **kwargs):
+            self.added.append(messages)
+            started.set()
+            assert release.wait(timeout=5)
+            return {}
+
+    old_backend = BlockingBackend()
+    p = _provider(tmp_path, monkeypatch, old_backend)
+    p._atexit_registered = True
+    p._deadletter_append("turn-A", "answer-A", ts=1)
+    p._deadletter_append("turn-B", "answer-B", ts=2)
+
+    old_thread = threading.Thread(
+        target=p._deadletter_replay, args=(old_backend,), daemon=True
+    )
+    old_thread.start()
+    assert started.wait(timeout=5)
+
+    new_backend = FakeBackend()
+    monkeypatch.setattr(
+        "plugins.memory.mem0._load_config",
+        lambda: {"mode": "oss", "oss": {}, "user_id": "kay"},
+    )
+    monkeypatch.setattr(p, "_create_backend", lambda: new_backend)
+    p.initialize("new-session", hermes_home=str(tmp_path))
+    release.set()
+    old_thread.join(timeout=5)
+
+    assert not old_thread.is_alive()
+    assert len(old_backend.added) == 1
+    assert old_backend.added[0][0]["content"].endswith("turn-A")
+    assert new_backend.added == []
+    queued = [
+        json.loads(line)["messages"][0]["content"]
+        for line in _deadletter(tmp_path).read_text().splitlines()
+    ]
+    assert queued == ["turn-A", "turn-B"]
+
+    p._deadletter_replay(new_backend)
+    assert [
+        m[0]["content"].rsplit("\n", 1)[-1] for m in new_backend.added
+    ] == ["turn-A", "turn-B"]
+    assert _drained(tmp_path)
+
+
 def test_mutate_failure_survives_and_does_not_duplicate(tmp_path, monkeypatch):
     backend = FakeBackend()
     p = _provider(tmp_path, monkeypatch, backend)
@@ -499,6 +549,66 @@ def test_reinitialize_discards_late_prefetch_result(tmp_path, monkeypatch):
     assert p._consecutive_failures == 3
     assert p._prefetch_result == ""
     assert p._prefetch_done is False
+
+
+def test_reinitialize_isolates_late_sync_failure_context(tmp_path, monkeypatch):
+    """A stale sync must queue to its launch profile without poisoning the new one."""
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingFailBackend(FakeBackend):
+        def add(self, messages, *, user_id, agent_id, infer=False, metadata=None):
+            started.set()
+            assert release.wait(timeout=5)
+            raise ConnectionError("old backend failed")
+
+    old_home = tmp_path / "old-profile"
+    new_home = tmp_path / "new-profile"
+    old_home.mkdir()
+    new_home.mkdir()
+
+    p = _provider(old_home, monkeypatch, BlockingFailBackend())
+    p._hermes_home = str(old_home)
+    p._user_id = "old-user"
+    p._agent_id = "old-agent"
+    p._channel = "old-channel"
+    p._atexit_registered = True
+    p.sync_turn("old turn", "old answer")
+    old_thread = p._sync_thread
+    assert old_thread is not None
+    assert started.wait(timeout=5)
+
+    replacement = FakeBackend()
+    monkeypatch.setattr(
+        "plugins.memory.mem0._load_config",
+        lambda: {
+            "mode": "oss",
+            "oss": {},
+            "user_id": "new-user",
+            "agent_id": "new-agent",
+        },
+    )
+    monkeypatch.setattr(p, "_create_backend", lambda: replacement)
+    p.initialize(
+        "new-session",
+        hermes_home=str(new_home),
+        platform="new-channel",
+    )
+
+    release.set()
+    old_thread.join(timeout=5)
+    assert not old_thread.is_alive()
+    assert p._backend is replacement
+    assert p._consecutive_failures == 0
+    assert not _deadletter(new_home).exists()
+
+    lines = _deadletter(old_home).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["messages"][0]["content"] == "old turn"
+    assert entry["user_id"] == "old-user"
+    assert entry["agent_id"] == "old-agent"
+    assert entry["metadata"] == {"channel": "old-channel"}
 
 
 # These workers deliberately stop on a durability boundary. They stay at module

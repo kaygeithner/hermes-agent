@@ -20,9 +20,9 @@ from cron.scheduler import _resolve_cron_disabled_toolsets
 
 
 # The toolsets that must be denied in cron context no matter what the
-# agent-scheduling gate says: messaging/clarify are interactive-only,
-# memory is unbacked in cron runs (skip_memory=True).
-ALWAYS_DISABLED = ["messaging", "clarify", "memory"]
+# agent-scheduling gate says: messaging/clarify are interactive-only.
+# ``memory`` is separately gated by the per-job operator opt-in.
+ALWAYS_DISABLED = ["messaging", "clarify"]
 
 
 class TestGateOffDefault:
@@ -60,7 +60,7 @@ class TestGateOn:
         disabled = _resolve_cron_disabled_toolsets(cfg)
         assert "cronjob" not in disabled
 
-    def test_interactivity_and_memory_denials_survive_the_gate(self):
+    def test_interactivity_denials_survive_the_gate(self):
         cfg = {"cron": {"allow_agent_scheduling": True}}
         disabled = _resolve_cron_disabled_toolsets(cfg)
         for name in ALWAYS_DISABLED:
@@ -101,6 +101,12 @@ class TestUserLayerUnchanged:
         assert "browser" in disabled
         # No duplicate when the user names an already-denied toolset.
         assert disabled.count("cronjob") == 1
+
+    def test_user_can_still_deny_memory_for_cron(self):
+        # Memory is no longer policy-denied, but a user-level denylist
+        # entry still applies to cron runs.
+        cfg = {"agent": {"disabled_toolsets": ["memory"]}}
+        assert "memory" in _resolve_cron_disabled_toolsets(cfg)
 
     def test_blank_and_whitespace_entries_ignored(self):
         cfg = {

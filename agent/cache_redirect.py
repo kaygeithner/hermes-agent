@@ -9,8 +9,12 @@ logger = logging.getLogger(__name__)
 
 def hermes_home_cache_base() -> str:
     """Return the absolute cache scratch root for the active Hermes profile."""
-    hermes_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
-    return os.path.join(hermes_home, "scratch", "caches")
+    # get_hermes_home() also honors the context-local override used by
+    # in-process profile routing. Reading only HERMES_HOME would redirect a
+    # named profile's child-process caches into the default profile.
+    from hermes_constants import get_hermes_home
+
+    return os.path.join(os.fspath(get_hermes_home()), "scratch", "caches")
 
 
 def cache_redirect_env(base_dir: str) -> dict[str, str]:

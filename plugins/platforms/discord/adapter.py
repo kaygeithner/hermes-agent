@@ -86,6 +86,7 @@ _DISCORD_COMMAND_SYNC_MAX_RATE_LIMIT_SLEEP_SECONDS = 30.0
 # send_typing() has arrived for this window, so a leaked "typing" ghost dies on
 # its own within ~45s of the run that owned it going away.
 _TYPING_LOOP_STALE_SECS = 45.0
+_TYPING_STOP_TIMEOUT_SECS = 1.0
 # Discord enforces a hard cap of 100 global application (slash) commands per
 # app. Registering more makes the ENTIRE sync fail with error 30032
 # ("Maximum number of application commands reached"), which silently breaks
@@ -93,6 +94,13 @@ _TYPING_LOOP_STALE_SECS = 45.0
 # at or below this limit at registration time.
 _DISCORD_MAX_APP_COMMANDS = 100
 _DISCORD_SELECT_FIELD_LIMIT = 100
+# Discord caps a single select menu at 25 options; a View holds at most 5 rows.
+_DISCORD_SELECT_MAX_OPTIONS = 25
+_DISCORD_SELECT_MAX_ROWS = 5
+# Model-select capacity: keep 2 rows for Back/Cancel, fill the rest with selects.
+_DISCORD_MODEL_SELECT_CAPACITY = (
+    _DISCORD_SELECT_MAX_ROWS - 2
+) * _DISCORD_SELECT_MAX_OPTIONS
 _DISCORD_BUTTON_LABEL_LIMIT = 80
 _DISCORD_ELLIPSIS = "\u2026"
 _DISCORD_NONCONVERSATIONAL_METADATA_KEYS = frozenset({
@@ -2167,6 +2175,11 @@ class DiscordAdapter(BasePlatformAdapter):
         # Cancel the liveness probe first so it can't fire a spurious fatal
         # error / reconnect while we're intentionally tearing the adapter down.
         await self._cancel_liveness_task()
+        # A run interrupted before its normal stop_typing() call must not leave
+        # detached endpoint-ping tasks behind adapter shutdown.
+        for chat_id in list(self._typing_tasks):
+            await self.stop_typing(chat_id)
+        self._typing_lease.clear()
         # Clean up all active voice connections *before* cancelling the bot task.
         # leave_voice_channel() ends in `await vc.disconnect()`, and discord.py's
         # VoiceClient.disconnect() sends a voice state update over the main
@@ -5622,9 +5635,11 @@ class DiscordAdapter(BasePlatformAdapter):
 
         async def _typing_loop() -> None:
             _loop = asyncio.get_running_loop()
+            _task = asyncio.current_task()
             try:
                 while True:
-                    if _loop.time() - self._typing_lease.get(chat_id, 0.0) > _TYPING_LOOP_STALE_SECS:
+                    lease_age = _loop.time() - self._typing_lease.get(chat_id, 0.0)
+                    if lease_age >= _TYPING_LOOP_STALE_SECS:
                         logger.debug(
                             "Discord typing loop self-terminated for %s (no send_typing for >%.0fs)",
                             chat_id, _TYPING_LOOP_STALE_SECS,
@@ -5652,13 +5667,26 @@ class DiscordAdapter(BasePlatformAdapter):
                                 chat_id, e,
                             )
                             return
-                        await asyncio.sleep(retry_after)
+                        remaining = _TYPING_LOOP_STALE_SECS - (
+                            _loop.time() - self._typing_lease.get(chat_id, 0.0)
+                        )
+                        await asyncio.sleep(min(retry_after, max(0.0, remaining)))
                         continue
-                    await asyncio.sleep(12)
+                    # Wake at lease expiry even though Discord normally only
+                    # needs a refresh every 12s. Otherwise a stale loop could
+                    # survive for nearly 57s despite the advertised 45s cap.
+                    remaining = _TYPING_LOOP_STALE_SECS - (
+                        _loop.time() - self._typing_lease.get(chat_id, 0.0)
+                    )
+                    await asyncio.sleep(min(12.0, max(0.0, remaining)))
             except asyncio.CancelledError:
                 pass
             finally:
-                self._typing_tasks.pop(chat_id, None)
+                # Do not let an older cancelled loop erase a replacement that
+                # was started concurrently for the same channel.
+                if self._typing_tasks.get(chat_id) is _task:
+                    self._typing_tasks.pop(chat_id, None)
+                    self._typing_lease.pop(chat_id, None)
 
         self._typing_tasks[chat_id] = asyncio.create_task(_typing_loop())
 
@@ -5667,10 +5695,25 @@ class DiscordAdapter(BasePlatformAdapter):
         task = self._typing_tasks.pop(chat_id, None)
         if task:
             task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+            done, pending = await asyncio.wait(
+                {task}, timeout=_TYPING_STOP_TIMEOUT_SECS
+            )
+            if pending:
+                logger.warning(
+                    "Discord typing task for %s ignored cancellation; "
+                    "detaching it until its stale lease terminates",
+                    chat_id,
+                )
+            else:
+                # Retrieve any non-cancellation exception so asyncio does not
+                # emit "Task exception was never retrieved" at shutdown.
+                try:
+                    task.exception()
+                except asyncio.CancelledError:
+                    pass
+        # Preserve a concurrently-created replacement's lease.
+        if chat_id not in self._typing_tasks:
+            self._typing_lease.pop(chat_id, None)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Get information about a Discord channel."""
@@ -8596,7 +8639,7 @@ class DiscordAdapter(BasePlatformAdapter):
             event.source,
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
-            profile=event.source.profile,
+            profile=self._session_key_profile(event.source),
         )
 
     def _enqueue_text_event(self, event: MessageEvent) -> None:
@@ -9243,7 +9286,7 @@ def _define_discord_view_classes() -> None:
 
             select = discord.ui.Select(
                 placeholder="Choose a provider...",
-                options=options[:25],
+                options=options[:_DISCORD_SELECT_MAX_OPTIONS],
                 custom_id="model_provider_select",
             )
             select.callback = self._on_provider_selected
@@ -9256,7 +9299,16 @@ def _define_discord_view_classes() -> None:
             self.add_item(cancel_btn)
 
         def _build_model_select(self, provider_slug: str):
-            """Build the model dropdown for a specific provider."""
+            """Build the model dropdown(s) for a specific provider.
+
+            Discord caps each ``discord.ui.Select`` at 25 options and a View at
+            5 action rows. We keep 2 rows for Back/Cancel, so partition the
+            model list across up to 3 select menus (75 slots) instead of
+            truncating at 25. This matters for providers like Nous whose
+            curated + Portal free-recommendation list exceeds 25 entries — the
+            tail (typically the ``:free`` Portal picks) was previously dropped
+            on Discord, so free-tier models never surfaced there.
+            """
             self.clear_items()
             provider = next(
                 (p for p in self.providers if p["slug"] == provider_slug), None
@@ -9265,31 +9317,48 @@ def _define_discord_view_classes() -> None:
                 return
 
             models = provider.get("models", [])
-            options = []
-            for model_id in models[:25]:
-                short = model_id.split("/")[-1] if "/" in model_id else model_id
-                options.append(
-                    discord.SelectOption(
-                        label=_truncate_discord_component_text(
-                            short,
-                            _DISCORD_SELECT_FIELD_LIMIT,
-                        ),
-                        value=_truncate_discord_component_text(
-                            model_id,
-                            _DISCORD_SELECT_FIELD_LIMIT,
-                        ),
-                    )
-                )
-            if not options:
+            if not models:
                 return
 
-            select = discord.ui.Select(
-                placeholder=f"Choose a model from {provider.get('name', provider_slug)}...",
-                options=options,
-                custom_id="model_model_select",
-            )
-            select.callback = self._on_model_selected
-            self.add_item(select)
+            # Slice the model list into <= 25-option chunks across (up to) 3
+            # select rows: 3 selects + Back/Cancel = 5 rows, Discord's View cap.
+            # Providers past that would still clip, but none currently do.
+            chunks = [
+                models[
+                    i : i + _DISCORD_SELECT_MAX_OPTIONS
+                ]
+                for i in range(0, len(models), _DISCORD_SELECT_MAX_OPTIONS)
+            ][
+                : _DISCORD_SELECT_MAX_ROWS - 2
+            ]  # keep 2 rows for Back/Cancel
+
+            placeholder_base = f"Choose a model from {provider.get('name', provider_slug)}"
+            for idx, chunk in enumerate(chunks):
+                options = []
+                for model_id in chunk:
+                    short = model_id.split("/")[-1] if "/" in model_id else model_id
+                    options.append(
+                        discord.SelectOption(
+                            label=_truncate_discord_component_text(
+                                short,
+                                _DISCORD_SELECT_FIELD_LIMIT,
+                            ),
+                            value=_truncate_discord_component_text(
+                                model_id,
+                                _DISCORD_SELECT_FIELD_LIMIT,
+                            ),
+                        )
+                    )
+                suffix = f" ({idx + 1}/{len(chunks)})" if len(chunks) > 1 else ""
+                select = discord.ui.Select(
+                    placeholder=f"{placeholder_base}{suffix}...",
+                    options=options,
+                    custom_id=f"model_model_select_{idx}",
+                )
+                # All model selects resolve through the same handler — the
+                # selected value is the model id, identical across rows.
+                select.callback = self._on_model_selected
+                self.add_item(select)
 
             back_btn = discord.ui.Button(
                 label="◀ Back", style=discord.ButtonStyle.grey, custom_id="model_back"
@@ -9354,8 +9423,15 @@ def _define_discord_view_classes() -> None:
 
             self._build_model_select(provider_slug)
 
+            # `shown` counts models actually rendered across the partitioned
+            # select menus (up to 3×25 = 75); the old code hard-capped at 25
+            # and silently dropped the tail (e.g. Nous `:free` Portal picks).
             total = provider.get("total_models", 0) if provider else 0
-            shown = min(len(provider.get("models", [])), 25) if provider else 0
+            shown = (
+                min(len(provider.get("models", [])), _DISCORD_MODEL_SELECT_CAPACITY)
+                if provider
+                else 0
+            )
             extra = f"\n*{total - shown} more available — type `/model <name>` directly*" if total > shown else ""
 
             await interaction.response.edit_message(
@@ -9529,7 +9605,7 @@ def _define_discord_view_classes() -> None:
             allowed_role_ids: Optional[set] = None,
         ):
             super().__init__(timeout=120)
-            self.choices = list(choices)[:25]  # Discord select cap
+            self.choices = list(choices)[:_DISCORD_SELECT_MAX_OPTIONS]
             self.on_choice_selected = on_choice_selected
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()

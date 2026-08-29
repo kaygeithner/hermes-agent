@@ -56,6 +56,27 @@ def test_apply_from_active_hermes_home(tmp_path, monkeypatch):
     assert os.path.isdir(expected)
 
 
+def test_apply_honors_context_local_profile_home(tmp_path, monkeypatch):
+    from agent.cache_redirect import apply_cache_redirect_from_hermes_home
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    process_home = tmp_path / "default"
+    profile_home = tmp_path / "profiles" / "work"
+    monkeypatch.setenv("HERMES_HOME", str(process_home))
+    for var in _CACHE_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+    token = set_hermes_home_override(profile_home)
+    try:
+        apply_cache_redirect_from_hermes_home()
+    finally:
+        reset_hermes_home_override(token)
+
+    expected = profile_home / "scratch" / "caches"
+    assert os.environ["PYTHONPYCACHEPREFIX"].startswith(str(expected))
+    assert expected.is_dir()
+
+
 def test_apply_defaults_degrades_when_base_cannot_be_prepared(tmp_path, monkeypatch):
     blocker = tmp_path / "file"
     blocker.write_text("x")

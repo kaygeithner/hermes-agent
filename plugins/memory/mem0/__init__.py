@@ -237,6 +237,9 @@ class Mem0MemoryProvider(MemoryProvider):
         self._rerank_default = False
         self._channel = "cli"  # gateway channel name (cli/telegram/discord/...)
         self._sync_thread = None
+        # Session generation for background sync workers. A cached provider may
+        # be reinitialized while an old backend call is still in flight.
+        self._sync_gen = 0
         self._prefetch_thread = None
         self._prefetch_query = ""
         self._prefetch_result = ""
@@ -259,6 +262,7 @@ class Mem0MemoryProvider(MemoryProvider):
         self._breaker_open_until = 0.0
         self._breaker_lock = threading.Lock()
         self._sync_lock = threading.Lock()
+        self._sync_state_lock = threading.Lock()
         self._prefetch_lock = threading.Lock()
         self._deadletter_lock = threading.Lock()
         self._atexit_registered = False
@@ -378,6 +382,11 @@ class Mem0MemoryProvider(MemoryProvider):
             )
 
     def initialize(self, session_id: str, **kwargs) -> None:
+        # Invalidate old sync workers before changing any session/profile state.
+        # Workers capture their launch context and check this token before they
+        # may mutate breaker/replay state.
+        with self._sync_state_lock:
+            self._sync_gen += 1
         self._config = _load_config()
         self._mode = self._config.get("mode", "platform")
         self._api_key = self._config.get("api_key", "")
@@ -611,7 +620,10 @@ class Mem0MemoryProvider(MemoryProvider):
         ]
 
     def _deadletter_append(self, user_content: str, assistant_content: str,
-                           ts: float = 0.0) -> bool:
+                           ts: float = 0.0, *, hermes_home: str | None = None,
+                           user_id: str | None = None,
+                           agent_id: str | None = None,
+                           metadata: dict | None = None) -> bool:
         """Queue a turn whose sync was dropped; True if durably queued.
 
         ``ts`` is the TURN timestamp (stamped when sync_turn was called, in
@@ -624,12 +636,15 @@ class Mem0MemoryProvider(MemoryProvider):
             entry = json.dumps({
                 "ts": ts or time.time(),
                 "messages": self._turn_messages(user_content, assistant_content),
-                "user_id": self._user_id,
-                "agent_id": self._agent_id,
-                "metadata": self._write_metadata(),
+                "user_id": self._user_id if user_id is None else user_id,
+                "agent_id": self._agent_id if agent_id is None else agent_id,
+                "metadata": self._write_metadata() if metadata is None else metadata,
             }, ensure_ascii=False)
             with self._deadletter_lock:
-                path = self._deadletter_path()
+                path = (
+                    Path(hermes_home) / "state" / "mem0-deadletter.jsonl"
+                    if hermes_home else self._deadletter_path()
+                )
                 parent_existed = path.parent.exists()
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if not parent_existed:
@@ -835,7 +850,7 @@ class Mem0MemoryProvider(MemoryProvider):
                 return
             entries.sort(key=lambda t: t[0])
             for ts, line, entry, messages in entries:
-                if self._shutting_down:
+                if self._shutting_down or backend is not self._backend:
                     return
                 if line not in self._replayed_pending:
                     try:
@@ -871,6 +886,12 @@ class Mem0MemoryProvider(MemoryProvider):
                             len(entries), attempts, e,
                         )
                         return
+                # initialize() can replace the backend while an old replay add
+                # is in flight. The old side effect may have happened, but it
+                # must never remove the shared queue entry or continue draining
+                # newer entries for the replacement backend.
+                if self._shutting_down or backend is not self._backend:
+                    return
                 try:
                     self._deadletter_mutate(remove=[line])
                 except Exception as e:
@@ -912,33 +933,63 @@ class Mem0MemoryProvider(MemoryProvider):
                   session_id: str = "", messages=None) -> None:
         """Send the turn to Mem0 for server-side fact extraction (non-blocking)."""
         turn_ts = time.time()  # conversation-order stamp for any queued copy
-        if self._backend is None or self._is_breaker_open():
+
+        with self._sync_state_lock:
+            backend = self._backend
+            launch_gen = self._sync_gen
+            launch_home = self._hermes_home
+            launch_user_id = self._user_id
+            launch_agent_id = self._agent_id
+            launch_metadata = self._write_metadata()
+
+        def _queue_launch_turn() -> bool:
+            return self._deadletter_append(
+                user_content,
+                assistant_content,
+                ts=turn_ts,
+                hermes_home=launch_home,
+                user_id=launch_user_id,
+                agent_id=launch_agent_id,
+                metadata=launch_metadata,
+            )
+
+        if backend is None or self._is_breaker_open():
             # Backend down or breaker open: queue instead of losing the turn.
-            self._deadletter_append(user_content, assistant_content, ts=turn_ts)
+            _queue_launch_turn()
             return
 
         def _sync():
-            backend = self._backend
-            if backend is None:
-                self._deadletter_append(user_content, assistant_content, ts=turn_ts)
-                return
             try:
                 backend.add(
                     self._turn_messages(user_content, assistant_content),
-                    user_id=self._user_id,
-                    agent_id=self._agent_id,
+                    user_id=launch_user_id,
+                    agent_id=launch_agent_id,
                     infer=True,
-                    metadata=self._write_metadata(),
+                    metadata=launch_metadata,
                 )
-                self._record_success()
             except Exception as e:
-                self._record_failure()
-                if self._deadletter_append(user_content, assistant_content, ts=turn_ts):
+                # Queue against the launch-time profile and identity even if
+                # initialize() has already repurposed this provider instance.
+                with self._sync_state_lock:
+                    current = (
+                        launch_gen == self._sync_gen
+                        and backend is self._backend
+                    )
+                    if current:
+                        self._record_failure()
+                if _queue_launch_turn():
                     logger.warning("Mem0 sync failed (turn queued for replay): %s", e)
                 else:
                     logger.warning("Mem0 sync failed and turn could not be queued: %s", e)
                 return
-            self._start_deadletter_replay(backend)
+
+            # A stale worker's backend side effect may have completed, but it
+            # must not mutate the replacement session's breaker/replay state.
+            with self._sync_state_lock:
+                if launch_gen != self._sync_gen or backend is not self._backend:
+                    return
+                self._record_success()
+                self._start_deadletter_replay(backend)
 
         with self._sync_lock:
             if self._sync_thread and self._sync_thread.is_alive():
@@ -947,7 +998,7 @@ class Mem0MemoryProvider(MemoryProvider):
             # skipped outright "to avoid duplicate ingestion" — i.e. dropped);
             # the in-flight sync's replay pass will pick it up.
             if self._sync_thread and self._sync_thread.is_alive():
-                self._deadletter_append(user_content, assistant_content, ts=turn_ts)
+                _queue_launch_turn()
                 return
             self._sync_thread = threading.Thread(target=_sync, daemon=True, name="mem0-sync")
             self._sync_thread.start()
