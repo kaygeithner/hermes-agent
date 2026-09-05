@@ -532,12 +532,17 @@ class CronPromptInjectionBlocked(Exception):
     """
 
 
-def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
+def _resolve_cron_disabled_toolsets(
+    cfg: dict, *, allow_memory_writes: bool = False
+) -> list[str]:
     """Toolsets a cron-spawned agent must never receive.
 
-    Two toolsets are always disabled in cron context regardless of config:
+    Interactive toolsets are always disabled in cron context:
       - ``messaging`` — interactive, needs a live gateway session
       - ``clarify`` — interactive, blocks waiting for user input
+
+    ``memory`` stays disabled unless the local operator explicitly opted the
+    job into built-in durable memory. External memory providers remain disabled.
 
     ``cronjob`` is policy-denied by default (loop prevention, not a security
     boundary) and config-gated: setting ``cron.allow_agent_scheduling: true``
@@ -555,6 +560,8 @@ def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
         disabled = ["messaging", "clarify"]
     else:
         disabled = ["cronjob", "messaging", "clarify"]
+    if not allow_memory_writes:
+        disabled.append("memory")
     agent_cfg = (cfg or {}).get("agent") or {}
     from agent.skill_utils import parse_config_string_list
 
@@ -6424,6 +6431,7 @@ def run_job(
         except Exception as e:
             logger.debug("Job '%s': SQLite session store not available: %s", job.get("id", "?"), e)
 
+        _allow_memory_writes = job.get("allow_memory_writes") is True
         agent = AIAgent(
             model=model,
             api_key=runtime.get("api_key"),
@@ -6445,7 +6453,9 @@ def run_job(
             provider_sort=pr.get("sort"),
             openrouter_min_coding_score=(_cfg.get("openrouter") or {}).get("min_coding_score"),
             enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
-            disabled_toolsets=_resolve_cron_disabled_toolsets(_cfg),
+            disabled_toolsets=_resolve_cron_disabled_toolsets(
+                _cfg, allow_memory_writes=_allow_memory_writes
+            ),
             quiet_mode=True,
             # Cron jobs should always inherit the user's SOUL.md identity from
             # HERMES_HOME. When a workdir is configured, also inject project
@@ -6453,11 +6463,8 @@ def run_job(
             # Without a workdir, keep cwd context discovery disabled.
             skip_context_files=not bool(_job_workdir),
             load_soul_identity=True,
-            # Memory is enabled for cron agents like any other agent run:
-            # MEMORY.md / USER.md load into the system prompt and the memory
-            # tool follows normal toolset resolution, so jobs benefit from
-            # (and can update) the user's persistent memory.
-            skip_memory=False,
+            skip_memory=not _allow_memory_writes,
+            skip_memory_provider=True,
             skip_background_review=True,  # Cron has no human-in-the-loop need for skill/memory review forks (~30K tok/event)
             platform="cron",
             session_id=_cron_session_id,

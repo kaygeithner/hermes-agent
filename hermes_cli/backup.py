@@ -102,6 +102,14 @@ _EXCLUDED_DIRS = {
     ".ruff_cache",
 }
 
+# Generated roots whose parents also hold user-authored artifacts. Match from
+# HERMES_HOME so ``scratch`` itself remains restorable.
+_EXCLUDED_PATH_PREFIXES = {
+    ("scratch", "caches"),
+    ("cache",),
+    ("web_cache",),
+}
+
 # File-name suffixes to skip
 _EXCLUDED_SUFFIXES = (
     ".pyc",
@@ -250,6 +258,17 @@ def _atomic_output_path(final_path: Path):
         raise
 
 
+def _open_backup_archive(path: Path, compression: str = "deflated") -> zipfile.ZipFile:
+    """Open a new backup archive using the requested compression mode."""
+    if compression == "stored":
+        return zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED)
+    if compression == "deflated":
+        return zipfile.ZipFile(
+            path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+        )
+    raise ValueError(f"unsupported backup compression: {compression}")
+
+
 def _collect_memory_provider_external_paths() -> List[Path]:
     """Return existing absolute paths the active memory provider stores
     outside HERMES_HOME, resolved from config only (no network, no init).
@@ -329,6 +348,16 @@ def _iter_external_files(base: Path) -> List[Path]:
 def _should_exclude(rel_path: Path) -> bool:
     """Return True if *rel_path* (relative to hermes root) should be skipped."""
     parts = rel_path.parts
+
+    # A full default-profile backup also contains named profiles. Apply the
+    # generated-root exclusions relative to each profile home, not only to the
+    # top-level HERMES_HOME.
+    logical_parts = parts[2:] if len(parts) >= 2 and parts[0] == "profiles" else parts
+    if any(
+        logical_parts[: len(prefix)] == prefix
+        for prefix in _EXCLUDED_PATH_PREFIXES
+    ):
+        return True
 
     for part in parts:
         if part not in _EXCLUDED_DIRS:
@@ -846,15 +875,9 @@ def _run_backup_locked(args, hermes_root: Path) -> None:
         dp = Path(dirpath)
         rel_dir = dp.relative_to(hermes_root)
 
-        # Prune excluded directories in-place so os.walk doesn't descend
-        # ``hermes-agent`` is only pruned at the root level; nested dirs
-        # with the same name (e.g. in skills/) must be preserved.
-        is_root = rel_dir == Path(".")
+        # Prune excluded directories in-place so os.walk doesn't descend.
         orig_dirnames = dirnames[:]
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in _EXCLUDED_DIRS or (d == "hermes-agent" and not is_root)
-        ]
+        dirnames[:] = [d for d in dirnames if not _should_exclude(rel_dir / d)]
         for removed in set(orig_dirnames) - set(dirnames):
             skipped_dirs.add(str(rel_dir / removed))
 
@@ -913,8 +936,8 @@ def _run_backup_locked(args, hermes_root: Path) -> None:
     errors = []
     t0 = time.monotonic()
 
-    with _atomic_output_path(out_path) as archive_path, zipfile.ZipFile(
-        archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6
+    with _atomic_output_path(out_path) as archive_path, _open_backup_archive(
+        archive_path, getattr(args, "compression", "deflated")
     ) as zf:
         for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
             try:
@@ -1088,6 +1111,23 @@ def _default_new_file_mode() -> Optional[int]:
     except OSError:
         return None
     return 0o666 & ~current
+
+
+def _archive_new_file_mode(
+    info: zipfile.ZipInfo, fallback: Optional[int]
+) -> Optional[int]:
+    """Return a safe archived mode for a newly restored regular file.
+
+    ``ZipFile.write`` records the source mode in ``external_attr``. Restoring
+    the umask default instead silently removes executable bits and loosens many
+    owner-only files on a fresh recovery. Archives from tools that omit Unix
+    mode metadata retain the historical umask-derived fallback. Setuid/setgid
+    are never accepted across this untrusted archive boundary.
+    """
+    archived = stat.S_IMODE(info.external_attr >> 16)
+    if not archived:
+        return fallback
+    return archived & ~(stat.S_ISUID | stat.S_ISGID)
 
 
 def _extract_member_atomically(
@@ -1273,7 +1313,12 @@ def run_import(args) -> None:
                     continue
                 try:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    _extract_member_atomically(zf, member, target, new_file_mode)
+                    _extract_member_atomically(
+                        zf,
+                        member,
+                        target,
+                        _archive_new_file_mode(zf.getinfo(member), new_file_mode),
+                    )
                     # External provider configs commonly hold credentials.
                     if target.suffix in {".json", ".env", ".conf"} or target.name in _SECRET_FILE_NAMES:
                         try:
@@ -1318,7 +1363,12 @@ def run_import(args) -> None:
 
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                _extract_member_atomically(zf, member, target, new_file_mode)
+                _extract_member_atomically(
+                    zf,
+                    member,
+                    target,
+                    _archive_new_file_mode(zf.getinfo(member), new_file_mode),
+                )
                 if target.name in _SECRET_FILE_NAMES:
                     os.chmod(target, 0o600)
                 restored += 1
@@ -1450,6 +1500,7 @@ _QUICK_STATE_FILES = (
     "auth.json",
     "cron/jobs.json",
     "cron/executions.db",
+    "cron/notepad.db",                   # per-job durable scratchpad state
     "gateway_state.json",
     "channel_directory.json",
     "channel_aliases.json",
@@ -2113,8 +2164,9 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional
     try:
         for dirpath, dirnames, filenames in os.walk(hermes_root, followlinks=False):
             dp = Path(dirpath)
-            # Prune excluded directories in-place so os.walk doesn't descend
-            dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
+            rel_dir = dp.relative_to(hermes_root)
+            # Prune excluded directories in-place so os.walk doesn't descend.
+            dirnames[:] = [d for d in dirnames if not _should_exclude(rel_dir / d)]
 
             for fname in filenames:
                 fpath = dp / fname
@@ -2142,8 +2194,8 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional
 
     archive_started = time.monotonic()
     try:
-        with _atomic_output_path(out_path) as archive_path, zipfile.ZipFile(
-            archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6
+        with _atomic_output_path(out_path) as archive_path, _open_backup_archive(
+            archive_path
         ) as zf:
             for index, (abs_path, rel_path) in enumerate(files_to_add, 1):
                 try:

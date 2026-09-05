@@ -2222,6 +2222,7 @@ def create_job(
     workdir: Optional[str] = None,
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
+    allow_memory_writes: Optional[bool] = None,
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
@@ -2327,6 +2328,8 @@ def create_job(
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
     normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
+    if allow_memory_writes is not None and not isinstance(allow_memory_writes, bool):
+        raise ValueError("allow_memory_writes must be a boolean when provided")
     normalized_monitor_script = str(monitor_script).strip() if isinstance(monitor_script, str) else None
     normalized_monitor_script = normalized_monitor_script or None
     normalized_monitor_url = str(monitor_url).strip() if isinstance(monitor_url, str) else None
@@ -2443,6 +2446,8 @@ def create_job(
     # absent key = job follows config resolution (pre-feature behavior).
     if normalized_reasoning_effort is not None:
         job["reasoning_effort"] = normalized_reasoning_effort
+    if allow_memory_writes is not None:
+        job["allow_memory_writes"] = allow_memory_writes
 
     with _jobs_lock():
         jobs = load_jobs()
@@ -2525,6 +2530,10 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
         raise ValueError(
             f"Cron job field(s) cannot be updated: {', '.join(sorted(bad_fields))}"
         )
+    if "allow_memory_writes" in updates and not isinstance(
+        updates["allow_memory_writes"], bool
+    ):
+        raise ValueError("allow_memory_writes must be a boolean")
 
     with _jobs_lock():
         jobs = load_jobs()

@@ -247,6 +247,28 @@ class OSSBackend(Mem0Backend):
             self._memory = Memory(memory_config)
         else:
             self._memory = Memory.from_config(config)
+        self._disable_llm_thinking()
+
+
+    def _disable_llm_thinking(self) -> None:
+        """Force thinking OFF on the extraction LLM.
+
+        DeepSeek/Qwen-served models default to thinking mode and mem0's OpenAI
+        config has no extra_body knob, so reasoning ate the max_tokens budget
+        and extraction returned content=None ("'NoneType' object has no
+        attribute 'strip'", ~6 silently dropped memory writes/day on the
+        DeepSeek cluster). Same wrap as the graphiti pilot's VllmStructuredClient.
+        """
+        try:
+            import functools
+
+            client = self._memory.llm.client
+            client.chat.completions.create = functools.partial(
+                client.chat.completions.create,
+                extra_body={"chat_template_kwargs": {"thinking": False,
+                                                     "enable_thinking": False}})
+        except Exception:  # noqa: BLE001 — non-OpenAI-shaped providers keep their defaults
+            pass
 
     @staticmethod
     def _recreate_collection_if_dims_changed(provider: str, vs_config: dict, expected_dims: int) -> None:

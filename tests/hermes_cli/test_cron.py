@@ -128,6 +128,50 @@ class TestCronCommandLifecycle:
         assert jobs[0]["skills"] == ["blogwatcher", "maps"]
         assert jobs[0]["name"] == "Skill combo"
 
+    def test_local_cli_can_opt_job_into_memory_writes(self, tmp_cron_dir, capsys):
+        cron_command(
+            Namespace(
+                cron_command="create",
+                schedule="every 1h",
+                prompt="Consolidate approved durable context",
+                name="Memory job",
+                deliver="local",
+                repeat=None,
+                skill=None,
+                skills=None,
+                script=None,
+                workdir=None,
+                no_agent=False,
+                allow_memory_writes=True,
+            )
+        )
+
+        job = list_jobs()[0]
+        assert job["allow_memory_writes"] is True
+
+        cron_command(
+            Namespace(
+                cron_command="edit",
+                job_id=job["id"],
+                schedule=None,
+                prompt=None,
+                name=None,
+                deliver=None,
+                repeat=None,
+                skill=None,
+                skills=None,
+                clear_skills=False,
+                add_skills=None,
+                remove_skills=None,
+                script=None,
+                workdir=None,
+                no_agent=None,
+                allow_memory_writes=False,
+            )
+        )
+        updated = get_job(job["id"])
+        assert updated is not None
+        assert updated["allow_memory_writes"] is False
 
 class TestCronDoctor:
     def test_doctor_reports_cron_health_issues(self, tmp_cron_dir, capsys):

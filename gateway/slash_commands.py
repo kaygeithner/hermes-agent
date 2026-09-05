@@ -689,6 +689,25 @@ class GatewaySlashCommandsMixin:
             base_url = _clean_str(session_row.get("billing_base_url"))
         context_used = context_used or _int_value(getattr(session_entry, "last_prompt_tokens", 0))
 
+        # A channel/thread pinned via channel_overrides should be reported even
+        # before the first turn persists a route: otherwise /status on a fresh
+        # session claims the global default model while the channel actually
+        # runs the pinned one.
+        if not model_name or not provider_name:
+            try:
+                from gateway.run import _channel_override_for_source
+
+                _ch_override = _channel_override_for_source(
+                    getattr(self, "config", None), source
+                )
+            except Exception:
+                _ch_override = None
+            if _ch_override is not None:
+                if _ch_override.model:
+                    model_name = _clean_str(_ch_override.model)
+                if _ch_override.provider:
+                    provider_name = _clean_str(_ch_override.provider)
+
         user_config: dict[str, Any] = {}
         if not model_name or not provider_name or not context_total:
             try:

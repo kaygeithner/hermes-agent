@@ -749,6 +749,11 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+# Redirect inherited tool caches only after the active profile resolves.
+from agent.cache_redirect import apply_cache_redirect_from_hermes_home
+
+apply_cache_redirect_from_hermes_home()
+
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from hermes_cli.config import get_hermes_home

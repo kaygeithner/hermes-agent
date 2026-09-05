@@ -806,6 +806,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         result["context_from"] = external_refs
     if isinstance(job.get("attach_to_session"), bool):
         result["attach_to_session"] = job["attach_to_session"]
+    if "allow_memory_writes" in job:
+        result["allow_memory_writes"] = job["allow_memory_writes"] is True
     return result
 
 
@@ -1479,6 +1481,7 @@ def cronjob(
     workdir: Optional[str] = None,
     no_agent: Optional[bool] = None,
     attach_to_session: Optional[bool] = None,
+    allow_memory_writes: Optional[bool] = None,
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
@@ -1492,6 +1495,8 @@ def cronjob(
         normalized = (action or "").strip().lower()
 
         if normalized == "create":
+            if allow_memory_writes is not None and not isinstance(allow_memory_writes, bool):
+                return tool_error("allow_memory_writes must be a boolean", success=False)
             if not schedule:
                 return tool_error("schedule is required for create", success=False)
             canonical_skills = _canonical_skills(skill, skills)
@@ -1590,6 +1595,7 @@ def cronjob(
                     workdir=_normalize_optional_job_value(workdir),
                     no_agent=_no_agent,
                     attach_to_session=attach_to_session,
+                    allow_memory_writes=allow_memory_writes,
                     monitor_script=_normalize_optional_job_value(monitor_script),
                     monitor_url=_normalize_optional_job_value(monitor_url),
                     # reasoning_effort reaches here from the CLI
@@ -1898,6 +1904,10 @@ def cronjob(
                 updates["enabled_toolsets"] = enabled_toolsets or None
             if attach_to_session is not None:
                 updates["attach_to_session"] = bool(attach_to_session)
+            if allow_memory_writes is not None:
+                if not isinstance(allow_memory_writes, bool):
+                    return tool_error("allow_memory_writes must be a boolean", success=False)
+                updates["allow_memory_writes"] = allow_memory_writes
             if workdir is not None:
                 # Empty string clears the field (restores old behaviour);
                 # otherwise pass raw — update_job() validates / normalizes.
