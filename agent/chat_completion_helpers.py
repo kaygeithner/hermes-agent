@@ -4073,6 +4073,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         role = "assistant"
         reasoning_parts: list = []
         usage_obj = None
+        from collections import deque as _deque
+        _last_chunks = _deque(maxlen=3)  # diagnostic: raw tail of the stream
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
         _writer_token = {"value": None}
@@ -4219,6 +4221,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             response=lambda: attempt_stream_response["value"],
         ):
             last_chunk_time["t"] = time.time()
+            _last_chunks.append(chunk)
             agent._touch_activity("receiving stream response")
 
             # Update per-attempt diagnostic counters.  Best-effort —
@@ -4327,15 +4330,22 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 content_parts.append(delta_content)
                 if not tool_calls_acc:
                     if pending_text_parts or _provider_stream_text_may_be_sse(delta_content):
+                        # Buffer text that still looks like an in-band SSE
+                        # control block (provider error events).  Do NOT
+                        # ``continue`` out of the loop body here: vLLM (and
+                        # any speculative-decoding server) puts finish_reason
+                        # on the same chunk as the last content delta, so
+                        # skipping the finish_reason/usage reads below turns
+                        # a normal stop into a false "mid-stream drop" plus
+                        # an unnecessary continuation nudge.
                         pending_text_parts.append(delta_content)
                         pending_text = "".join(pending_text_parts)
-                        if _provider_stream_text_may_be_sse(pending_text):
-                            continue
-                        _flush_pending_stream_text()
-                        continue
-                    _fire_first_delta()
-                    agent._fire_stream_delta(delta_content)
-                    deltas_were_sent["yes"] = True
+                        if not _provider_stream_text_may_be_sse(pending_text):
+                            _flush_pending_stream_text()
+                    else:
+                        _fire_first_delta()
+                        agent._fire_stream_delta(delta_content)
+                        deltas_were_sent["yes"] = True
                 # Tool calls suppress regular content streaming (avoids
                 # displaying chatty "I'll use the tool..." text alongside
                 # tool calls).  But reasoning tags embedded in suppressed
@@ -4603,7 +4613,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         if _text_only_dropped_no_finish:
             logger.warning(
                 "Stream ended with no finish_reason after delivering text "
-                "with no tool calls; treating as a mid-stream drop."
+                "with no tool calls; treating as a mid-stream drop. "
+                "last_chunks=%s pending_text=%r content_tail=%r",
+                [repr(c)[:400] for c in _last_chunks],
+                "".join(pending_text_parts)[-200:],
+                (full_content or "")[-200:],
             )
             return _build_partial_stream_stub(
                 role, full_content,

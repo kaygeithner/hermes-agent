@@ -789,3 +789,41 @@ class TestSendTimePadMultimodalSafety:
         assert out[2]["content"] == ""
         # input list untouched (repair is copy-on-write)
         assert api_messages[1]["content"] == ""
+
+
+# ── finish_reason on a buffered (SSE-looking) content chunk ─────────────────
+
+class TestFinishReasonOnBufferedContentChunk:
+    """Regression: ``finish_reason`` must be recorded even when it arrives on
+    a content chunk that the in-band SSE text buffer is still holding.
+
+    vLLM (and any speculative-decoding server) puts ``finish_reason`` on the
+    same chunk as the last content delta.  When a preceding delta started
+    with ``:`` (e.g. the ``:/`` token of a trailing ``MEDIA:/path`` line) the
+    buffer engages, and the old code ``continue``d past the finish_reason
+    read — turning a normal stop into a false "mid-stream drop" plus a
+    needless continuation nudge.
+    """
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_sse_like_tail_keeps_finish_reason(self, _mock_close, mock_create, monkeypatch):
+        def _stream():
+            yield _make_stream_chunk(content="ID")
+            yield _make_stream_chunk(content=": 42", finish_reason="stop")
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = lambda *a, **kw: _stream()
+        mock_create.return_value = mock_client
+
+        agent = _make_agent()
+        monkeypatch.setenv("HERMES_STREAM_RETRIES", "0")
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.id != PARTIAL_STREAM_STUB_ID, (
+            "A stream whose final content chunk carries finish_reason must not "
+            "be classified as a mid-stream drop."
+        )
+        assert response.choices[0].finish_reason == "stop"
+        assert response.choices[0].message.content == "ID: 42"
+        assert response.choices[0].message.tool_calls is None
