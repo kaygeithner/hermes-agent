@@ -29,7 +29,7 @@ def test_registered_handler_drops_model_supplied_memory_privilege(monkeypatch):
     import tools.cronjob_tools as cron_tools
 
     monkeypatch.setattr(cron_tools, "cronjob", lambda **kwargs: kwargs)
-    entry = cron_tools.registry.get_entry("cronjob")
+    entry = cron_tools.registry.get_entry("cronjob_manage")
     assert entry is not None
 
     result = entry.handler(

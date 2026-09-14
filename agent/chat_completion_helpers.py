@@ -2778,10 +2778,6 @@ class _StreamingCall(StreamingWaitMonitor):
             for text in pending_parts:
                 (self._route_suppressed_text if tool_calls_acc else self._emit_text)(text)
 
-        for chunk in _iter_provider_stream_chunks(stream, response=lambda: self._attempt_stream_response):
-            self._count_chunk(_diag, chunk)
-            _last_chunks.append(chunk)
-
         from agent import relay_llm
         stream = self._set_managed_stream(relay_llm.stream(self.api_kwargs, _open_stream,
             **_relay_stream_identity(self.agent, "provider"), finalizer=relay_response.finalize,
@@ -2795,6 +2791,7 @@ class _StreamingCall(StreamingWaitMonitor):
 
         for chunk in _iter_provider_stream_chunks(stream, response=lambda: self._attempt_stream_response):
             self._count_chunk(_diag, chunk)
+            _last_chunks.append(chunk)
             if self.agent._interrupt_requested:
                 # A half-read SSE response stays checked out of the httpx pool and the finally
                 # would cache the client WITH the leaked connection: close on the owner first.

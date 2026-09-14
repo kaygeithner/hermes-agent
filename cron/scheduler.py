@@ -2187,6 +2187,9 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
         skip_context_files=not bool(workdir),
         load_soul_identity=True,
         skip_memory=not _allow_memory_writes,
+        # Local patch: external memory providers never run in cron context,
+        # even when the job opted into built-in durable memory writes.
+        skip_memory_provider=True,
         skip_background_review=True,  # Cron has no human-in-the-loop need for skill/memory review forks (~30K tok/event)
         platform="cron",
         session_id=session_id,

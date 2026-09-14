@@ -1,11 +1,11 @@
 import os
 import shlex
 
+from tools.code_execution_env import _scrub_child_env  # moved out of the tool module upstream
 from tools.code_execution_tool import (
     _apply_child_cache_redirect_defaults,
     _child_cache_redirect_env,
     _sandbox_cache_env_prefix,
-    _scrub_child_env,
 )
 
 

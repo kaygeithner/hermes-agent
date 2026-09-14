@@ -184,6 +184,10 @@ class Mem0MemoryProvider(MemoryProvider):
         self._sync_state_lock = threading.Lock()
         self._prefetch_lock = threading.Lock()
         self._deadletter_lock = threading.Lock()
+        # Default before initialize() resolves the configured cap: bare provider
+        # instances (tests, dead-letter workers) must still be able to build
+        # turn messages.
+        self._sync_max_chars = _SYNC_MSG_MAX_CHARS
         self._atexit_registered = False
 
     @property
@@ -339,6 +343,19 @@ class Mem0MemoryProvider(MemoryProvider):
     def _add(self, messages: list, infer: bool):
         metadata = {"channel": self._channel} if self._channel else {}
         return self._backend.add(messages, user_id=self._user_id, agent_id=self._agent_id, infer=infer, metadata=metadata)
+
+    def _read_filters(self) -> Dict[str, Any]:
+        # Scoped to user_id only — by design — so recall surfaces memories
+        # written from any gateway/agent under this principal. Writes attach
+        # agent_id (and metadata.channel) so per-agent / per-channel views are
+        # still possible at query time when needed; reads default to the wider
+        # cross-agent recall.
+        return {"user_id": self._user_id}
+
+    def _write_metadata(self) -> Dict[str, Any]:
+        # Tag every write with the gateway channel so the dashboard can offer
+        # per-channel filtered views without coupling identity to the channel.
+        return {"channel": self._channel} if self._channel else {}
 
     def system_prompt_block(self) -> str:
         # Mirror _create_backend precedence (oss > host > platform). Rerank is a Mem0 Platform feature only.

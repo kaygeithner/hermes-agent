@@ -238,8 +238,9 @@ class GatewayStatusCommandsMixin:
         # A channel/thread pinned via channel_overrides should be reported even
         # before the first turn persists a route: otherwise /status on a fresh
         # session claims the global default model while the channel actually
-        # runs the pinned one. (Local patch.)
-        if not model_name or not provider_name:
+        # runs the pinned one. The override beats the global-default fallback
+        # but not a persisted per-session route. (Local patch.)
+        if not persisted_route.get("model"):
             try:
                 from gateway.run import _channel_override_for_source
                 _ch_override = _channel_override_for_source(

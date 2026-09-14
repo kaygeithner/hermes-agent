@@ -312,6 +312,8 @@ class TestMem0ModeSwitch:
     def test_default_mode_is_platform(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         monkeypatch.setenv("MEM0_API_KEY", "test-key")
+        # Isolate the ambient gateway env (this install runs MEM0_MODE=oss).
+        monkeypatch.delenv("MEM0_MODE", raising=False)
         provider = Mem0MemoryProvider()
         provider.initialize("test")
         assert provider._mode == "platform"
@@ -322,6 +324,7 @@ class TestMem0ModeSwitch:
         config_path = tmp_path / "mem0.json"
         config_path.write_text('{"user_id": "old-user"}')
         monkeypatch.setenv("MEM0_API_KEY", "test-key")
+        monkeypatch.delenv("MEM0_MODE", raising=False)
         provider = Mem0MemoryProvider()
         provider.initialize("test")
         assert provider._mode == "platform"
