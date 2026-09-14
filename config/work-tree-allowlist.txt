@@ -13,6 +13,11 @@
 # lean-abs (APMT Lean/ABS working files), standards (technical standards corpus)
 # and hermes-upgrades (upgrade staging, keep only <2-week-old content) approved
 # by Kay on 2026-09-07 during the weekly housekeeping review.
+# hermes-webui (Hermes WebUI repo; serves www.suzerain.app via 127.0.0.1:8787)
+# and m2 (dossier-governance M2 staging: kb m2-claude branch + content drafts,
+# relay_approvals.py / stage_drafts.py) approved by Kay on 2026-09-14 during
+# the weekly housekeeping review. WebUI/Steuer repair state merged into
+# hermes-ops/notes/suzerain-app-deployment/.
 apmt-work-intelligence
 archive
 browser-harness
@@ -25,7 +30,9 @@ head-ade-application
 hermes-context-audits
 hermes-ops
 hermes-upgrades
+hermes-webui
 lean-abs
+m2
 neon-strike
 personal-admin-finance-vendors
 research
