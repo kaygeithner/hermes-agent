@@ -156,10 +156,9 @@ class TestStatusCommandAdvertisesChannelOverride:
         handler._agent_cache = {}
         handler._agent_cache_lock = None
         handler._session_db = MagicMock()
-        handler._session_db.get_session_title = AsyncMock(return_value=None)
-        handler._session_db.get_session = AsyncMock(return_value={})
-        handler._session_db.get_dominant_session_model_route = AsyncMock(
-            return_value={}
+        # Upstream v0.21.2 consolidated the SessionDB reads into one helper.
+        handler._status_session_db_facts = AsyncMock(
+            return_value=(None, {}, 0, {})
         )
         handler.adapters = {}
 
