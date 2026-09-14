@@ -19,3 +19,28 @@ def test_cronjob_schema_action_description_flags_create_requirements():
     assert "REQUIRED" in action_desc
 
 
+def test_cronjob_schema_does_not_expose_memory_write_privilege():
+    from tools.cronjob_tools import CRONJOB_SCHEMA
+
+    assert "allow_memory_writes" not in CRONJOB_SCHEMA["parameters"]["properties"]
+
+
+def test_registered_handler_drops_model_supplied_memory_privilege(monkeypatch):
+    import tools.cronjob_tools as cron_tools
+
+    monkeypatch.setattr(cron_tools, "cronjob", lambda **kwargs: kwargs)
+    entry = cron_tools.registry.get_entry("cronjob")
+    assert entry is not None
+
+    result = entry.handler(
+        {
+            "action": "create",
+            "allow_memory_writes": True,
+            "attach_to_session": True,
+        }
+    )
+
+    assert "allow_memory_writes" not in result
+    assert result["attach_to_session"] is True
+
+

@@ -235,6 +235,23 @@ class GatewayStatusCommandsMixin:
         model_name, provider_name, context_used, context_total = _status_model_route(
             status_agent, persisted_route, session_row, session_entry
         )
+        # A channel/thread pinned via channel_overrides should be reported even
+        # before the first turn persists a route: otherwise /status on a fresh
+        # session claims the global default model while the channel actually
+        # runs the pinned one. (Local patch.)
+        if not model_name or not provider_name:
+            try:
+                from gateway.run import _channel_override_for_source
+                _ch_override = _channel_override_for_source(
+                    getattr(self, "config", None), source
+                )
+            except Exception:
+                _ch_override = None
+            if _ch_override is not None:
+                if _ch_override.model:
+                    model_name = str(_ch_override.model)
+                if _ch_override.provider:
+                    provider_name = str(_ch_override.provider)
 
         stamp = "%Y-%m-%d %H:%M"
         lines = [t("gateway.status.header"), "",

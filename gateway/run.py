@@ -2891,6 +2891,31 @@ def _get_channel_override(
     return None
 
 
+def _channel_override_for_source(
+    config: Optional[GatewayConfig], source: Optional[SessionSource]
+) -> Optional[ChannelOverride]:
+    """Channel override for a message source, or None.
+
+    Mirrors the model-routing lookup in ``_resolve_session_agent_runtime``
+    (exact thread/channel id first, then parent channel/forum id) so display
+    paths like ``/status`` and the ``/reset`` banner report the model a pinned
+    channel will actually run instead of the global default before the first
+    turn persists a route. (Local patch.)
+    """
+    if config is None or source is None:
+        return None
+    chat_id = str(source.chat_id) if source.chat_id else ""
+    thread_id = str(getattr(source, "thread_id", None) or "") or None
+    parent_id = str(getattr(source, "parent_chat_id", None) or "") or None
+    return _get_channel_override(
+        config,
+        source.platform,
+        chat_id,
+        thread_id=thread_id,
+        parent_id=parent_id,
+    )
+
+
 def _resolve_hermes_bin() -> Optional[list[str]]:
     """Hermes update command argv: ``hermes`` on PATH, else ``python -m hermes_cli.main``, else None."""
     import shutil

@@ -99,6 +99,40 @@ def _spill_full_stdout(stdout_text: str) -> Optional[str]:
         return None
 
 
+def _child_cache_redirect_env() -> dict[str, str]:
+    """Return cache redirects only when their local base can be prepared."""
+    from agent.cache_redirect import cache_redirect_env, hermes_home_cache_base
+
+    base = hermes_home_cache_base()
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        logger.debug(
+            "execute_code: cache redirect skipped (could not prepare %s)",
+            base,
+            exc_info=True,
+        )
+        return {}
+    return cache_redirect_env(base)
+
+
+def _apply_child_cache_redirect_defaults(child_env: dict[str, str]) -> None:
+    """Inject redirects without clobbering explicit passthrough values."""
+    for key, value in _child_cache_redirect_env().items():
+        child_env.setdefault(key, value)
+
+
+def _sandbox_cache_env_prefix(sandbox_dir: str) -> str:
+    """Return shell-safe cache assignments scoped to a remote sandbox."""
+    base = f"{sandbox_dir}/.caches"
+    values = {
+        "PYTHONPYCACHEPREFIX": f"{base}/pycache",
+        "MYPY_CACHE_DIR": f"{base}/mypy",
+        "RUFF_CACHE_DIR": f"{base}/ruff",
+    }
+    return " ".join(f"{key}={shlex.quote(value)}" for key, value in values.items())
+
+
 def check_sandbox_requirements() -> bool:
     """check_fn: available unless the vercel_sandbox backend fails its own checks."""
     if not SANDBOX_AVAILABLE:
@@ -577,7 +611,8 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
                   max_tool_calls, sandbox_tools, stop_event, rpc_token))
         rpc_thread.start()
         env_prefix = (f"HERMES_RPC_DIR={quoted_rpc_dir} HERMES_RPC_TOKEN={shlex.quote(rpc_token)} "
-                      "PYTHONDONTWRITEBYTECODE=1")
+                      "PYTHONDONTWRITEBYTECODE=1 "
+                      f"{_sandbox_cache_env_prefix(sandbox_dir)}")
         tz = os.getenv("HERMES_TIMEZONE", "").strip()
         if tz:
             env_prefix += f" TZ={shlex.quote(tz)}"

@@ -318,6 +318,44 @@ class TestUnifiedCronjobTool:
         assert resumed["success"] is True
         assert resumed["job"]["state"] == "scheduled"
 
+    def test_allow_memory_writes_create_update_and_list(self):
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="Maintain explicitly approved durable context",
+                schedule="every 1h",
+                allow_memory_writes=True,
+                attach_to_session=True,
+            )
+        )
+        job_id = created["job_id"]
+        assert created["job"]["allow_memory_writes"] is True
+
+        updated = json.loads(
+            cronjob(
+                action="update",
+                job_id=job_id,
+                allow_memory_writes=False,
+                attach_to_session=False,
+            )
+        )
+        assert updated["job"]["allow_memory_writes"] is False
+
+        listing = json.loads(cronjob(action="list"))
+        assert listing["jobs"][0]["allow_memory_writes"] is False
+
+    def test_allow_memory_writes_rejects_non_boolean_direct_calls(self):
+        result = json.loads(
+            cronjob(
+                action="create",
+                prompt="bad",
+                schedule="every 1h",
+                allow_memory_writes="yes",  # type: ignore[arg-type]
+            )
+        )
+        assert result["success"] is False
+        assert "boolean" in result["error"]
+
 
     @staticmethod
     def _patch_named_legit(monkeypatch):

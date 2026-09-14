@@ -120,6 +120,12 @@ def test_openai_backend_uses_real_mem0_config_and_factory(monkeypatch, tmp_path)
     assert len(clients) == 1
     assert clients[0].api_key == "configured-openai-sentinel"
     assert clients[0].base_url == "https://openai.example/v1"
+    # Local transplant: _disable_llm_thinking() wraps create() with a fixed extra_body;
+    # verify it, then compare the rest of the request against upstream expectations.
+    assert all(
+        r.pop("extra_body", None) == {"chat_template_kwargs": {"thinking": False, "enable_thinking": False}}
+        for r in requests
+    )
     assert requests == [
         {
             "model": "gpt-5-mini",

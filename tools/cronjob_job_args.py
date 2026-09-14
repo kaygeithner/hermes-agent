@@ -391,6 +391,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         result["context_from"] = external_refs
     if isinstance(job.get("attach_to_session"), bool):
         result["attach_to_session"] = job["attach_to_session"]
+    if "allow_memory_writes" in job:
+        result["allow_memory_writes"] = job["allow_memory_writes"] is True
     return result
 
 

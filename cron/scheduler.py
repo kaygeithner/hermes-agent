@@ -370,11 +370,16 @@ class CronPromptInjectionBlocked(Exception):
     """
 
 
-def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
+def _resolve_cron_disabled_toolsets(
+    cfg: dict, *, allow_memory_writes: bool = False
+) -> list[str]:
     """Toolsets a cron-spawned agent must never receive: ``messaging``/``clarify`` always
     (interactive); ``cronjob`` by default (loop prevention, not a security boundary —
     ``cron.allow_agent_scheduling: true`` lifts only that); ``agent.disabled_toolsets`` layered on
     top so per-job ``enabled_toolsets`` cannot widen past config.yaml's denylist.
+
+    ``memory`` stays disabled unless the local operator explicitly opted the job into
+    built-in durable memory via ``allow_memory_writes`` (local patch).
 
     See #25752.
     """
@@ -383,6 +388,8 @@ def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
         disabled = ["messaging", "clarify"]
     else:
         disabled = ["cronjob", "messaging", "clarify"]
+    if not allow_memory_writes:
+        disabled.append("memory")
     agent_cfg = (cfg or {}).get("agent") or {}
     from agent.skill_utils import parse_config_string_list
 
@@ -2150,6 +2157,7 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
 def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup, *, workdir, session_id, session_db):
     runtime = setup.runtime
     pr = _cfg.get("provider_routing") or {}
+    _allow_memory_writes = job.get("allow_memory_writes") is True
     return AIAgent(
         model=setup.model,
         api_key=runtime.get("api_key"),
@@ -2171,12 +2179,14 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
         provider_sort=pr.get("sort"),
         openrouter_min_coding_score=(_cfg.get("openrouter") or {}).get("min_coding_score"),
         enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
-        disabled_toolsets=_resolve_cron_disabled_toolsets(_cfg),
+        disabled_toolsets=_resolve_cron_disabled_toolsets(
+            _cfg, allow_memory_writes=_allow_memory_writes
+        ),
         quiet_mode=True,
         # Project context files only with a configured workdir; SOUL.md always.
         skip_context_files=not bool(workdir),
         load_soul_identity=True,
-        skip_memory=False,
+        skip_memory=not _allow_memory_writes,
         skip_background_review=True,  # Cron has no human-in-the-loop need for skill/memory review forks (~30K tok/event)
         platform="cron",
         session_id=session_id,
