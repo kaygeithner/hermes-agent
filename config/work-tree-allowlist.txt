@@ -18,12 +18,22 @@
 # relay_approvals.py / stage_drafts.py) approved by Kay on 2026-09-14 during
 # the weekly housekeeping review. WebUI/Steuer repair state merged into
 # hermes-ops/notes/suzerain-app-deployment/.
+# design-review (Design Review AI web app: systemd design-review.service on
+# 127.0.0.1:18790, public via suzerain.app/design-review nginx proxy, BS 7608
+# corpus + benchmark bench), downloads (download staging; currently the Callao
+# CLZ10 ZPMC "Final pack" 68 MB cited by the Callao dossier) and site (static
+# web roots served by nginx: public suzerain.app/our-own-ai/ CES Local AI Lab
+# one-pager) approved by Kay on 2026-09-22 during the weekly housekeeping
+# review. jev-tests from the same report was deleted (transient JEV test
+# artifacts).
 apmt-work-intelligence
 archive
 browser-harness
 checkpoints
 context-system
+design-review
 deliverables
+downloads
 goals
 graphiti-pilot
 head-ade-application
@@ -37,5 +47,6 @@ neon-strike
 personal-admin-finance-vendors
 research
 scratch
+site
 silent-structural-risk-rewrite
 standards
