@@ -48,6 +48,14 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         help="Skip the LLM entirely — run --script on schedule and deliver "
             "its stdout directly. Empty stdout = silent. Classic watchdog "
             "pattern (memory alerts, disk alerts, CI pings).")
+    cron_create.add_argument(
+        "--allow-memory-writes",
+        action="store_true",
+        help=(
+            "Explicitly allow this LLM-driven job to write built-in durable memory. "
+            "Local operator surface only; external memory providers remain disabled."
+        ),
+    )
     cron_create.add_argument("--monitor-script", dest="monitor_script",
         help="Monitor mode: path to a cheap source script under "
             "~/.hermes/scripts/ that runs each tick BEFORE the agent. "
@@ -115,6 +123,22 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "existing script on the job).")
     cron_edit.add_argument("--agent", dest="no_agent", action="store_const", const=False,
         help="Disable no-agent mode on this job (reverts to LLM-driven execution).")
+    memory_writes = cron_edit.add_mutually_exclusive_group()
+    memory_writes.add_argument(
+        "--allow-memory-writes",
+        dest="allow_memory_writes",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Allow this LLM-driven job to write built-in durable memory.",
+    )
+    memory_writes.add_argument(
+        "--deny-memory-writes",
+        dest="allow_memory_writes",
+        action="store_const",
+        const=False,
+        help="Deny this job access to built-in durable memory (default).",
+    )
     cron_edit.add_argument(
         "--continuity", dest="continuity", action="store_const", const=True, default=None,
         help="Turn on run-to-run continuity: each run sees the job's own "

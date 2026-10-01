@@ -1747,6 +1747,7 @@ def create_job(
     workdir: Optional[str] = None,
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
+    allow_memory_writes: Optional[bool] = None,
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
@@ -1786,6 +1787,8 @@ def create_job(
     normalized_skills = _normalize_skill_list(skill, skills)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
     normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
+    if allow_memory_writes is not None and not isinstance(allow_memory_writes, bool):
+        raise ValueError("allow_memory_writes must be a boolean when provided")
 
     _validate_job_mode_invariants(f["monitor_script"], f["monitor_url"], f["no_agent"], f["script"])
     prompt_text = _coerce_job_text(prompt).strip()
@@ -1848,6 +1851,7 @@ def create_job(
     for key, value in (
         ("attach_to_session", normalized_attach), ("reasoning_effort", normalized_reasoning_effort),
         ("failure_deliver", f["failure_deliver"]),
+        ("allow_memory_writes", allow_memory_writes),
     ):
         if value is not None:
             job[key] = value
@@ -2028,6 +2032,10 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
     bad_fields = _IMMUTABLE_JOB_FIELDS.intersection(updates or {})
     if bad_fields:
         raise ValueError(f"Cron job field(s) cannot be updated: {', '.join(sorted(bad_fields))}")
+    if "allow_memory_writes" in updates and not isinstance(
+        updates["allow_memory_writes"], bool
+    ):
+        raise ValueError("allow_memory_writes must be a boolean")
 
     def apply(jobs, i, job):
         _rederive_repeat_for_schedule_change(job, updates)

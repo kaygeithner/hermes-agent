@@ -291,6 +291,10 @@ class AIAgent(
         gateway_session_key: str = None,
         skip_context_files: bool = False, load_soul_identity: bool = False,
         skip_memory: bool = False, skip_background_review: bool = False,
+        # Local patch: separate external-provider kill switch. Upstream folded
+        # provider-skipping into skip_memory; we keep the finer grain so cron
+        # jobs can opt into BUILT-IN memory writes while providers stay off.
+        skip_memory_provider: bool = False,
         session_db=None, parent_session_id: str = None,
         iteration_budget: "IterationBudget" = None, run_budget_seconds: Optional[float] = None,
         fallback_model: Dict[str, Any] = None, credential_pool=None,

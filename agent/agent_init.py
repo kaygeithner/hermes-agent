@@ -1256,7 +1256,7 @@ def _memory_provider_init_kwargs(agent, platform) -> Dict[str, Any]:
     return kwargs
 
 
-def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
+def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None, skip_memory_provider=False):
     # Persistent memory (MEMORY.md + USER.md) — loaded from disk
     agent._memory_store = None
     agent._memory_enabled = False
@@ -1302,7 +1302,7 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
         # already-initialized manager: providers keep their prefetch/retain state across turns instead
         # of being re-initialized (#120116). No initialize_all — the providers are already bound.
         agent._memory_manager = memory_manager
-    elif not skip_memory:
+    elif not skip_memory and not skip_memory_provider:
         try:
             _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
             if not is_core_memory_provider(_mem_provider_name):
@@ -2345,6 +2345,8 @@ def init_agent(
     chat_id: str = None, chat_name: str = None, chat_type: str = None, thread_id: str = None,
     gateway_session_key: str = None, skip_context_files: bool = False,
     load_soul_identity: bool = False, skip_memory: bool = False,
+    # Local patch: separate external-provider kill switch (see run_agent.AIAgent).
+    skip_memory_provider: bool = False,
     skip_background_review: bool = False, session_db=None, parent_session_id: str = None,
     iteration_budget: "IterationBudget" = None, run_budget_seconds: Optional[float] = None,
     fallback_model: Dict[str, Any] = None, credential_pool=None, checkpoints_enabled: bool = False,
@@ -2434,7 +2436,8 @@ def init_agent(
         _agent_cfg = {}
 
     _apply_display_config(agent, _agent_cfg, platform)
-    _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=memory_manager)
+    _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=memory_manager,
+                 skip_memory_provider=skip_memory_provider)
     _apply_agent_section(agent, _agent_cfg)
     cs = _parse_compression_config(agent, _agent_cfg)
     _config_context_length, _custom_providers, _effective_context_length, _model_cfg = _resolve_context_length(

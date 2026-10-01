@@ -21,6 +21,12 @@ def build_backup_parser(subparsers, *, cmd_backup: Callable) -> None:
     backup_parser.add_argument(
         "-l", "--label", help="Label for the snapshot (only used with --quick)")
     backup_parser.add_argument(
+        "--compression",
+        choices=("deflated", "stored"),
+        default="deflated",
+        help="ZIP compression mode (default: deflated; stored is faster but larger)",
+    )
+    backup_parser.add_argument(
         "-k", "--keep", type=int, default=3, metavar="N",
         help="After a full backup, delete older hermes-backup-*.zip files in the output "
              "directory beyond the newest N (default 3; 0 keeps everything)")

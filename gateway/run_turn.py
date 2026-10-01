@@ -2331,13 +2331,29 @@ class GatewayTurnMixin:
         Call via ``asyncio.to_thread``: resolution can block (credential refresh, context-length
         probes), and the scope is entered here so contextvars behave in the worker thread."""
         with self._profile_scope_for_source(source):
-            return self._format_session_info()
+            return self._format_session_info(source)
 
-    def _format_session_info(self) -> str:
-        """Model / provider / context-length / endpoint block so users can spot bad context detection."""
+    def _format_session_info(self, source: Optional[SessionSource] = None) -> str:
+        """Model / provider / context-length / endpoint block so users can spot bad context detection.
+
+        When ``source`` has a channel/thread override, the advertised model
+        and provider reflect the pinned channel config instead of the global
+        default (local patch)."""
         from gateway.run import _resolve_gateway_model_context
         resolved = _resolve_gateway_model_context()
+        model = resolved.model
+        provider = resolved.provider
         context_length = resolved.context_length
+        try:
+            from gateway.run import _channel_override_for_source
+            _ch = _channel_override_for_source(getattr(self, "config", None), source)
+        except Exception:
+            _ch = None
+        if _ch is not None:
+            if _ch.model:
+                model = _ch.model
+            if _ch.provider:
+                provider = _ch.provider
         ctx_source = {
             "config": "config",
             "default": "default — set model.context_length in config to override",
@@ -2347,8 +2363,8 @@ class GatewayTurnMixin:
             else f"{context_length // 1_000}K" if context_length >= 1_000 else str(context_length)
         )
         lines = [
-            f"◆ Model: `{resolved.model}`",
-            f"◆ Provider: {resolved.provider or 'openrouter'}",
+            f"◆ Model: `{model}`",
+            f"◆ Provider: {provider or 'openrouter'}",
             f"◆ Context: {ctx_display} tokens ({ctx_source})",
         ]
         if (resolved.provider or "") == "moa":

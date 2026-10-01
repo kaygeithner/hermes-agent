@@ -2998,6 +2998,12 @@ class _StreamingCall(StreamingWaitMonitor):
         finish_reason = model_name = usage_obj = None
         response_id = upstream_provider = None  # the provider's own id / serving upstream, from the chunks
         role = "assistant"
+        # Local patch: raw tail of the stream, logged when a drop warning fires
+        # so a real network drop can be told apart from a parser gap.
+        from collections import deque as _deque
+        _last_chunks = _deque(maxlen=3)
+        self._drop_diag_chunks = _last_chunks
+        self._drop_diag_pending = pending_text_parts
         _diag = self._new_diag()
         self._writer_token = self._attempt_request_client = self._attempt_stream_response = None
         from agent.chat_completion_helpers_relay import RelayChatAccumulator
@@ -3026,6 +3032,7 @@ class _StreamingCall(StreamingWaitMonitor):
 
         for chunk in _iter_provider_stream_chunks(stream, response=lambda: self._attempt_stream_response):
             self._count_chunk(_diag, chunk)
+            _last_chunks.append(chunk)
             if self.agent._interrupt_requested:
                 # A half-read SSE response stays checked out of the httpx pool and the finally
                 # would cache the client WITH the leaked connection: close on the owner first.
@@ -3206,9 +3213,23 @@ class _StreamingCall(StreamingWaitMonitor):
             # finish_text_response would then surface a truncated thought as the answer.
             # A usage object proves the provider finished (include_usage's final chunk).
             logger.warning(
-                "Stream ended with no finish_reason after delivering text with no tool calls; treating as a mid-stream drop.")
-            return _build_partial_stream_stub(role, full_content, full_reasoning, model_name, usage_obj)
-        effective_finish_reason = "length" if has_truncated_tool_args else (finish_reason or "stop")
+                "Stream ended with no finish_reason after delivering text "
+                "with no tool calls; treating as a mid-stream drop. "
+                "last_chunks=%s pending_text=%r content_tail=%r",
+                [repr(c)[:400] for c in getattr(self, "_drop_diag_chunks", ())],
+                "".join(getattr(self, "_drop_diag_pending", []))[-200:],
+                (full_content or "")[-200:],
+            )
+            return _build_partial_stream_stub(
+                role, full_content,
+                "".join(reasoning_parts) or None,
+                model_name, usage_obj,
+            )
+
+        effective_finish_reason = finish_reason or "stop"
+        if has_truncated_tool_args:
+            effective_finish_reason = "length"
+
         provider_stream_error = _provider_stream_error_from_text(
             full_content or "", effective_finish_reason, response=getattr(stream, "response", None))
         if provider_stream_error is not None:

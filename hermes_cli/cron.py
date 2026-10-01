@@ -703,6 +703,7 @@ def cron_create(args):
         skill=getattr(args, "skill", None),
         skills=_normalize_skills(getattr(args, "skill", None), getattr(args, "skills", None)),
         no_agent=getattr(args, "no_agent", False) or None,
+        allow_memory_writes=getattr(args, "allow_memory_writes", False) or None,
         **({"paused": args.paused, "paused_reason": getattr(args, "paused_reason", None)}
            if getattr(args, "paused", False) or getattr(args, "paused_reason", None) is not None else {}),
         **_job_api_kwargs(args))
@@ -750,7 +751,9 @@ def cron_edit(args):
     result = _cron_api(action="update", job_id=args.job_id,
                        schedule=getattr(args, "schedule", None),
                        prompt=getattr(args, "prompt", None), skills=final_skills,
-                       no_agent=getattr(args, "no_agent", None), **_job_api_kwargs(args))
+                       no_agent=getattr(args, "no_agent", None),
+                       allow_memory_writes=getattr(args, "allow_memory_writes", None),
+                       **_job_api_kwargs(args))
     if not result.get("success"):
         print(color(f"Failed to update job: {result.get('error', 'unknown error')}", Colors.RED))
         return 1
