@@ -266,11 +266,6 @@ class GatewayStatusCommandsMixin:
             if resolved is not None and resolved.context_source != "default":
                 context_total = _int_value(resolved.context_length)
 
-        fields = build_status_fields(
-            session_entry.session_id, None, session_row, title=title, model=model_name, provider=provider_name,
-            created=session_entry.created_at, last_activity=session_entry.updated_at,
-            tokens=db_total_tokens, agent_running=is_running,
-        )
         # A channel/thread pinned via channel_overrides should be reported even
         # before the first turn persists a route: otherwise /status on a fresh
         # session claims the global default model while the channel actually
@@ -290,6 +285,11 @@ class GatewayStatusCommandsMixin:
                 if _ch_override.provider:
                     provider_name = str(_ch_override.provider)
 
+        fields = build_status_fields(
+            session_entry.session_id, None, session_row, title=title, model=model_name, provider=provider_name,
+            created=session_entry.created_at, last_activity=session_entry.updated_at,
+            tokens=db_total_tokens, agent_running=is_running,
+        )
         stamp = "%Y-%m-%d %H:%M"
         lines = [t("gateway.status.header"), "",
                  t("gateway.status.session_id", session_id=fields["session_id"])]
