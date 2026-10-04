@@ -85,6 +85,8 @@ environments/benchmarks/evals/
 
 # Web UI build output
 hermes_cli/web_dist/
+# Rollback copies of the previous build left by the cutover script (web_dist.pre-<ver>/)
+hermes_cli/web_dist.pre-*/
 # Cross-process web UI build lock (flock target, always empty)
 .web_ui_build.lock
 apps/desktop/build/
