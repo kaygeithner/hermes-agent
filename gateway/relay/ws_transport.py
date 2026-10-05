@@ -153,9 +153,9 @@ def _normalize_slack_parent_command(text: str, message_type: MessageType) -> tup
     return normalized, normalized_type
 
 
-# A connector may only LOWER a turn's effort (voice turns): no wire-driven cost increase. parse_reasoning_effort
-# would also accept "high"/"xhigh"/"max"/"ultra" (hermes_constants.VALID_REASONING_EFFORTS).
-_RELAY_REASONING_EFFORTS = frozenset({"minimal", "low", "medium"})
+# The app's per-chat reasoning level (and fast voice turns). "none" disables thinking; "max"/"ultra" never cross the
+# wire (provider-specific, costly). parse_reasoning_effort rejects anything else anyway.
+_RELAY_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
 
 
 def _relay_metadata(meta: Any) -> Dict[str, Any]:
