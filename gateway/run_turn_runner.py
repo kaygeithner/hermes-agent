@@ -1938,7 +1938,10 @@ class TurnRunner:
             }
         pr = runner._provider_routing
         reasoning_config = runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key, model=model)
-        runner._reasoning_config = reasoning_config
+        runner._reasoning_config = reasoning_config  # the SESSION value; a per-turn override below applies to this agent only
+        if ctx.reasoning_effort:  # per-turn override (relay inbound metadata): this agent call only
+            from hermes_constants import parse_reasoning_effort
+            reasoning_config = parse_reasoning_effort(ctx.reasoning_effort) or reasoning_config
         runner._service_tier = runner._resolve_session_service_tier(source=ctx.source, session_key=ctx.session_key)
         stream_consumer, stream_delta_cb, interim_cb, want_interim = self._setup_stream_consumer(platform_key)
         turn_route = runner._resolve_turn_agent_config(ctx.message, model, runtime_kwargs)
