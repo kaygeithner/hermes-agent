@@ -26,7 +26,7 @@
 # one-pager) approved by Kay on 2026-09-22 during the weekly housekeeping
 # review. jev-tests from the same report was deleted (transient JEV test
 # artifacts).
-apmt-work-intelligence
+apmt-state
 archive
 browser-harness
 checkpoints
@@ -35,7 +35,6 @@ design-review
 deliverables
 downloads
 goals
-graphiti-pilot
 head-ade-application
 hermes-context-audits
 hermes-ops
