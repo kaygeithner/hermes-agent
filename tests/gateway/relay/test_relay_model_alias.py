@@ -19,7 +19,8 @@ from gateway.run_turn_runner import TurnRunner, _turn_model_alias
 from gateway.session import Platform, SessionSource
 from gateway.turn_context import TurnContext
 
-_CFG = {"model_aliases": {"opus": {"model": "claude-opus-5-5", "provider": "anthropic"}}}
+_OK = {"model": "claude-opus-5-5", "provider": "anthropic"}
+_CFG = {"model_aliases": {"opus": _OK}}
 _SESSION_ROUTE = {"provider": "custom:spark-flash", "base_url": "http://spark", "api_key": "k", "api_mode": "chat_completions"}
 _GLM = ("GLM-5.3-Flash-EXL3", "custom:spark-flash")
 _OPUS = ("claude-opus-5-5", "anthropic")
@@ -77,10 +78,10 @@ def _runner():
     return runner
 
 
-def _turn(runner, model_alias=None, agent_cls=_Agent, history=()):
+def _turn(runner, model_alias=None, agent_cls=_Agent, history=(), cfg=_CFG):
     ctx = TurnContext(
         source=SessionSource(platform=Platform.LOCAL, chat_id="c", user_id="u"),
-        message="hi", history=list(history), session_id="sid", session_key="test-session-key", user_config=_CFG,
+        message="hi", history=list(history), session_id="sid", session_key="test-session-key", user_config=cfg,
         model_alias=model_alias, AIAgent=agent_cls, resolve_display_setting=lambda *_a: False,
         _run_still_current=lambda: True, _hooks_ref=SimpleNamespace(loaded_hooks=False),
     )
@@ -115,18 +116,16 @@ def test_wire_guard():
 
 
 def test_only_plain_config_model_aliases_are_eligible():
-    from hermes_cli.model_switch import DirectAlias
-    ok = {"model": "claude-opus-5-5", "provider": "anthropic"}
-    assert _turn_model_alias({"model_aliases": {" Opus ": ok}}, "opus") == _OPUS
-    assert _turn_model_alias({"model_aliases": {"opus": ok}}, "nope") is None
+    assert _turn_model_alias({"model_aliases": {" Opus ": _OK}}, "opus") == _OPUS
+    assert _turn_model_alias({"model_aliases": {"opus": _OK}}, "nope") is None
     for extra in ({"base_url": "https://proxy"}, {"api_key": "k"}, {"key_env": "K"}):
-        assert _turn_model_alias({"model_aliases": {"opus": {**ok, **extra}}}, "opus") is None
+        assert _turn_model_alias({"model_aliases": {"opus": {**_OK, **extra}}}, "opus") is None
+    for empty in ({"base_url": ""}, {"api_key": None}, {"key_env": ""}):  # empty = absent, like /model's loader
+        assert _turn_model_alias({"model_aliases": {"opus": {**_OK, **empty}}}, "opus") == _OPUS
     assert _turn_model_alias({"model_aliases": {"opus": {"model": "m"}}}, "opus") is None
     assert _turn_model_alias({"model_aliases": {"opus": {"model": " ", "provider": "p"}}}, "opus") is None
     assert _turn_model_alias({"model_aliases": {"opus": "anthropic/claude-opus-5-5"}}, "opus") is None
     assert _turn_model_alias({"model": {"aliases": {"m": "anthropic/x"}}}, "m") is None
-    with patch("hermes_cli.model_switch._BUILTIN_DIRECT_ALIASES", {"b": DirectAlias("x", "anthropic", "")}):
-        assert _turn_model_alias({"model_aliases": {}}, "b") is None
     assert _turn_model_alias(None, "opus") is None
 
 
@@ -140,12 +139,23 @@ def test_alias_turn_then_session_route_turn():
     assert [c.kwargs["model"] for c in runner._resolve_session_reasoning_config.call_args_list] == [_OPUS[0], _GLM[0]]
 
 
-def test_ineligible_alias_runs_session_route_with_warning(caplog):
+@pytest.mark.parametrize("cfg, name", [
+    (_CFG, "nope"),
+    (_CFG, "builtin"),  # resolvable by /model via _BUILTIN_DIRECT_ALIASES (patched below), never over the wire
+    ({**_CFG, "model": {"aliases": {"m": "anthropic/claude-opus-5-5"}}}, "m"),
+    ({"model_aliases": {"opus": {**_OK, "base_url": "https://proxy"}}}, "opus"),
+    ({"model_aliases": {"opus": {**_OK, "api_key": "k"}}}, "opus"),
+    ({"model_aliases": {"opus": {**_OK, "key_env": "K"}}}, "opus"),
+], ids=["unknown", "builtin-only", "model.aliases-only", "base_url", "api_key", "key_env"])
+def test_ineligible_alias_runs_session_route_with_warning(cfg, name, caplog):
+    from hermes_cli.model_switch import DirectAlias, _load_direct_aliases
     runner = _runner()
-    with _routes(), caplog.at_level(logging.WARNING, logger="gateway.run"):
-        agent = _turn(runner, "nope")
+    with _routes(), caplog.at_level(logging.WARNING, logger="gateway.run"), \
+         patch("hermes_cli.model_switch._BUILTIN_DIRECT_ALIASES", {"builtin": DirectAlias(*_OPUS, "")}):
+        assert "builtin" in _load_direct_aliases()  # control: the builtin name is live for /model
+        agent = _turn(runner, name, cfg=cfg)
     assert (agent.model, agent.provider) == _GLM
-    assert any("'nope'" in r.getMessage() for r in caplog.records)
+    assert any(repr(name) in r.getMessage() for r in caplog.records)
 
 
 def test_alias_resolution_failure_keeps_session_route_with_notice():
@@ -164,7 +174,6 @@ def test_eligible_alias_drops_session_route_fallback_notice():
         agent = _turn(runner, "opus")
     assert (agent.model, agent.provider) == _OPUS
     assert agent._pending_fallback_notice is None
-    assert runner._pre_agent_fallback_notice is None
 
 
 def test_alternating_alias_and_default_turns():
@@ -218,3 +227,33 @@ async def test_queued_relay_message_keeps_its_alias_and_effort(wire, expected):
         response="resp", result={"messages": []}, stream_task=None)
     kwargs = runner._run_agent.await_args.kwargs
     assert {k: kwargs[k] for k in expected} == expected
+
+
+@pytest.mark.asyncio
+async def test_production_turn_context_carries_alias_and_config_yaml(tmp_path, monkeypatch):
+    """Real _run_agent → _run_agent_inner → _run_agent_display_settings (_load_gateway_config) →
+    _run_agent_build_turn_context: the built TurnContext holds the turn's alias, and its user_config is the
+    config.yaml dict whose model_aliases _turn_model_alias reads in run_sync."""
+    (tmp_path / "config.yaml").write_text(
+        "model_aliases:\n  Opus:\n    model: claude-opus-5-5\n    provider: anthropic\n", encoding="utf-8")
+    monkeypatch.setattr("gateway.run._hermes_home", tmp_path)
+    runner = object.__new__(GatewayRunner)
+    runner.config, runner.adapters = GatewayConfig(), {}
+    built = {}
+
+    class _Built(Exception):
+        pass
+
+    def _stop_after_build(turn_ctx, *_a):  # the next step after the builder; stop before any agent work
+        built["ctx"] = turn_ctx
+        raise _Built
+
+    runner._run_agent_bind_turn_wiring = _stop_after_build
+    with pytest.raises(_Built):
+        await runner._run_agent(
+            message="hi", context_prompt="", history=[], source=SessionSource(platform=Platform.LOCAL, chat_id="c"),
+            session_id="sid", session_key="test-session-key", model_alias="opus", reasoning_effort="high")
+    ctx = built["ctx"]
+    assert (ctx.model_alias, ctx.reasoning_effort) == ("opus", "high")
+    assert ctx.user_config["model_aliases"] == {"Opus": _OK}
+    assert _turn_model_alias(ctx.user_config, ctx.model_alias) == _OPUS

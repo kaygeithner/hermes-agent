@@ -38,12 +38,13 @@ logger = logging.getLogger("gateway.run")
 def _turn_model_alias(user_config: Any, name: str) -> Optional[tuple]:
     """``(model, provider)`` of the config.yaml ``model_aliases`` entry a relay turn picked, else None. Never builtin
     or ``model.aliases`` names (their "current provider" semantics must not be wire-triggerable), and never an entry
-    with its own base_url/api_key/key_env: _resolve_runtime_agent_kwargs_for_provider ignores those (#28660)."""
+    with a non-empty base_url/api_key/key_env (empty = absent, like /model's loader):
+    _resolve_runtime_agent_kwargs_for_provider ignores those (#28660)."""
     aliases = user_config.get("model_aliases") if isinstance(user_config, dict) else None
     if not isinstance(aliases, dict):
         return None
     entry = {str(k).strip().lower(): v for k, v in aliases.items()}.get(name)  # keys normalised like _load_direct_aliases
-    if not isinstance(entry, dict) or any(k in entry for k in ("base_url", "api_key", "key_env")):
+    if not isinstance(entry, dict) or any(entry.get(k) for k in ("base_url", "api_key", "key_env")):
         return None
     model, provider = str(entry.get("model") or "").strip(), str(entry.get("provider") or "").strip()
     return (model, provider) if model and provider else None

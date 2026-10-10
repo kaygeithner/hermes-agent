@@ -3917,7 +3917,8 @@ class GatewayTurnMixin:
                 run_generation=run_generation, _interrupt_depth=_interrupt_depth + 1,
                 event_message_id=next_message_id, inbound_message_id=next_inbound_id,
                 channel_prompt=next_channel_prompt, message_type=next_message_type,
-                # A queued relay turn keeps its per-turn picks, like the main path (P4/P6).
+                # A queued relay turn keeps its per-turn picks, like the main path (P4/P6). These metadata keys
+                # are relay-inbound only: _relay_metadata filters the wire, nothing gateway-internal sets them.
                 reasoning_effort=(getattr(pending_event, "metadata", None) or {}).get("reasoning_effort"),
                 model_alias=(getattr(pending_event, "metadata", None) or {}).get("model_alias"),
                 persist_user_message=next_persist_message,
