@@ -159,11 +159,20 @@ _RELAY_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high"
 
 
 def _relay_metadata(meta: Any) -> Dict[str, Any]:
-    """Inbound ``metadata`` -> ``MessageEvent.metadata``: only an allowed ``reasoning_effort`` crosses the wire;
-    other event-metadata keys steer session routing and must stay gateway-internal."""
-    effort = meta.get("reasoning_effort") if isinstance(meta, dict) else None
+    """Inbound ``metadata`` -> ``MessageEvent.metadata``: only an allowed ``reasoning_effort``/``model_alias`` crosses
+    the wire; other event-metadata keys steer session routing and must stay gateway-internal."""
+    out: Dict[str, Any] = {}
+    if not isinstance(meta, dict):
+        return out
+    effort = meta.get("reasoning_effort")
     effort = effort.strip().lower() if isinstance(effort, str) else None
-    return {"reasoning_effort": effort} if effort in _RELAY_REASONING_EFFORTS else {}
+    if effort in _RELAY_REASONING_EFFORTS:
+        out["reasoning_effort"] = effort
+    alias = meta.get("model_alias")
+    alias = alias.strip().lower() if isinstance(alias, str) else None
+    if alias and len(alias) <= 64:  # a config.yaml model_aliases key; run_sync checks it is eligible
+        out["model_alias"] = alias
+    return out
 
 
 def _media_types_from_wire(raw: Dict[str, Any]) -> list[str]:

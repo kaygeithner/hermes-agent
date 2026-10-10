@@ -45,6 +45,7 @@ class TurnContext:
     context_prompt: Optional[str] = None
     channel_prompt: Optional[str] = None
     reasoning_effort: Optional[str] = None  # per-turn override (relay inbound metadata), never the session's
+    model_alias: Optional[str] = None  # per-turn config.yaml model_aliases key (relay inbound metadata), never the session's
     session_id: Optional[str] = None
     session_key: Optional[str] = None
     run_generation: Optional[int] = None
