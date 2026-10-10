@@ -6,9 +6,13 @@ import threading
 import types
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from gateway.config import GatewayConfig
 from gateway.relay.ws_transport import _relay_metadata
+from gateway.run import GatewayRunner
 from gateway.run_agent_cache import GatewayAgentCacheMixin
 from gateway.run_turn import GatewayTurnMixin
 from gateway.run_turn_runner import TurnRunner, _turn_model_alias
@@ -186,3 +190,31 @@ def test_rebuilt_agent_loads_post_compaction_transcript_not_evicted_state():
     assert glm is not opus and (glm.model, glm.provider) == _GLM
     assert [m["content"] for m in glm.history] == [m["content"] for m in compacted]
     assert glm.context_compressor._previous_summary is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wire, expected", [
+    ({"model_alias": "Opus", "reasoning_effort": "high"}, {"model_alias": "opus", "reasoning_effort": "high"}),
+    (None, {"model_alias": None, "reasoning_effort": None}),  # no metadata: session route, session effort
+])
+async def test_queued_relay_message_keeps_its_alias_and_effort(wire, expected):
+    """A message that arrived mid-turn is replayed via _run_agent_queued_followup; its per-turn picks ride along."""
+    runner = object.__new__(GatewayRunner)
+    runner.config, runner.adapters, runner._MAX_INTERRUPT_DEPTH = GatewayConfig(), {}, 8
+    runner._run_agent = AsyncMock(return_value={"final_response": "done", "messages": []})
+    runner._run_agent_deliver_first_response = runner._refresh_agent_cache_message_count = AsyncMock()
+    runner._prepare_profile_scoped_inbound_message_text = AsyncMock(return_value="queued")
+    runner._is_goal_continuation_event = MagicMock(return_value=False)
+    runner._session_key_for_source = MagicMock(return_value="test-session-key")
+    runner._reply_anchor_for_event = runner._delivery_adapter_for = MagicMock(return_value=None)
+    source = SessionSource(platform=Platform.LOCAL, chat_id="c", user_id="u")
+    turn_ctx = SimpleNamespace(source=source, session_id="sid", session_key="test-session-key", run_generation=1,
+                               _interrupt_depth=0, history=[], _status_thread_metadata=None, context_prompt=None,
+                               result_holder=[None])
+    pending_event = SimpleNamespace(source=source, message_id="m2", channel_prompt=None, message_type=None,
+                                    internal=False, metadata=_relay_metadata(wire))
+    await GatewayRunner._run_agent_queued_followup(
+        runner, turn_ctx, adapter=None, pending="queued", pending_event=pending_event,
+        response="resp", result={"messages": []}, stream_task=None)
+    kwargs = runner._run_agent.await_args.kwargs
+    assert {k: kwargs[k] for k in expected} == expected
