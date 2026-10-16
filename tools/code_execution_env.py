@@ -121,6 +121,13 @@ def _build_child_env(*, rpc_endpoint: str, rpc_token: str, tmpdir: str,
     child_env["HERMES_RPC_SOCKET"] = rpc_endpoint
     child_env["HERMES_RPC_TOKEN"] = rpc_token
     child_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # Local patch: cache redirects for the sandboxed child (import lazily to
+    # avoid a circular import with tools.code_execution_tool).
+    try:
+        from tools.code_execution_tool import _apply_child_cache_redirect_defaults
+        _apply_child_cache_redirect_defaults(child_env)
+    except Exception:
+        pass
     # Force UTF-8 stdio and default file encoding: on Windows sys.stdout is bound to the console
     # code page (cp1252) and print("→") raises; harmless under a C/POSIX locale (containers).
     child_env["PYTHONIOENCODING"] = "utf-8"
