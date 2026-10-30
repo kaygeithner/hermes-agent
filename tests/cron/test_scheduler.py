@@ -693,8 +693,8 @@ class TestRunJobSessionPersistence:
             "name": "test",
             "prompt": "hello",
         }
-        with self._run_job_patches(tmp_path) as (_fake_db, mock_agent_cls):
-            run_job(job)
+        with self._run_job_patches(tmp_path) as (fake_db, mock_agent_cls):
+            _run_owned_job(job, tmp_path, fake_db)  # owner-execution seam: the in-process AIAgent path
 
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["skip_memory"] is True
@@ -709,8 +709,8 @@ class TestRunJobSessionPersistence:
             "prompt": "remember what you learn",
             "enabled_toolsets": ["memory", "file"],
         }
-        with self._run_job_patches(tmp_path) as (_fake_db, mock_agent_cls):
-            run_job(job)
+        with self._run_job_patches(tmp_path) as (fake_db, mock_agent_cls):
+            _run_owned_job(job, tmp_path, fake_db)  # owner-execution seam: the in-process AIAgent path
 
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["skip_memory"] is True
