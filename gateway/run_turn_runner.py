@@ -36,6 +36,22 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
 
+
+def _turn_model_alias(user_config: Any, name: str) -> Optional[tuple]:
+    """``(model, provider)`` of the config.yaml ``model_aliases`` entry a relay turn picked, else None. Never builtin
+    or ``model.aliases`` names (their "current provider" semantics must not be wire-triggerable), and never an entry
+    with a non-empty base_url/api_key/key_env (empty = absent, like /model's loader):
+    _resolve_runtime_agent_kwargs_for_provider ignores those (#28660)."""
+    aliases = user_config.get("model_aliases") if isinstance(user_config, dict) else None
+    if not isinstance(aliases, dict):
+        return None
+    entry = {str(k).strip().lower(): v for k, v in aliases.items()}.get(name)  # keys normalised like _load_direct_aliases
+    if not isinstance(entry, dict) or any(entry.get(k) for k in ("base_url", "api_key", "key_env")):
+        return None
+    model, provider = str(entry.get("model") or "").strip(), str(entry.get("provider") or "").strip()
+    return (model, provider) if model and provider else None
+
+
 # Consecutive turns a session's persisted transcript may lag its live cached history before
 # _load_turn_history escalates the lag line from WARNING to ERROR (#114266: 11 days of WARNING).
 _TRANSCRIPT_LAG_ESCALATION_TURNS = 3
@@ -1268,6 +1284,22 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             text, reason, retryable = _resolution_failure_reply(exc, ctx.source.platform)
             return stamp_failure({"final_response": text, "messages": [], "api_calls": 0, "tools": [],
                                   "failed": True, "completed": False, "error": str(exc)}, reason, retryable)
+        if ctx.model_alias:  # per-turn pick (relay inbound metadata): beats the session route, this turn only
+            alias = _turn_model_alias(ctx.user_config, ctx.model_alias)
+            if alias is None:  # hub pick missing from model_aliases: a config mismatch, not routine
+                logger.warning("model_alias %r is not an eligible model_aliases entry; running %s", ctx.model_alias, model)
+            else:
+                from gateway.run import _resolve_runtime_agent_kwargs_for_provider
+                try:
+                    runtime_kwargs = _resolve_runtime_agent_kwargs_for_provider(alias[1], target_model=alias[0])
+                    model, pending_fallback_notice = alias[0], None  # the session route's notice no longer applies
+                except Exception as exc:
+                    # Keep the session route (a working model is in hand) and say so, not the dead "couldn't
+                    # connect" turn; the badge shows what actually answered.
+                    logger.warning("model_alias %r (%s/%s) unavailable: %s", ctx.model_alias, alias[1], alias[0], exc)
+                    from hermes_cli.fallback_config import pre_agent_fallback_notice
+                    pending_fallback_notice = pre_agent_fallback_notice(
+                        alias[1], alias[0], runtime_kwargs.get("provider"), model)
         from gateway.session_authorities import active_authority
         from gateway.session_worker_construct import session_routing
         pr = session_routing(active_authority(runner), policy) if policy else runner._provider_routing
@@ -1287,7 +1319,10 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             tier = _request_service_tier(api['settings'].get('model_options'))
             if tier is not _REQUEST_OPTION_MISSING:
                 runner._service_tier = tier
-        runner._reasoning_config = reasoning_config
+        runner._reasoning_config = reasoning_config  # the SESSION value; a per-turn override below applies to this agent only
+        if ctx.reasoning_effort:  # per-turn override (relay inbound metadata): this agent call only
+            from hermes_constants import parse_reasoning_effort
+            reasoning_config = parse_reasoning_effort(ctx.reasoning_effort) or reasoning_config
         stream_consumer, stream_delta_cb, interim_cb, want_interim = self._setup_stream_consumer(platform_key)
         turn_route = runner._resolve_turn_agent_config(ctx.message, model, runtime_kwargs)
         agent, reused_cached_agent = self._resolve_turn_agent(

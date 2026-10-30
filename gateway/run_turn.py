@@ -271,6 +271,8 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                 inbound_message_id=str(event.message_id) if event.message_id else None,
                 channel_prompt=_turn_channel_prompt, moa_config=getattr(event, "_moa_config", None),
                 title_user_message=prepared.title_user_message,
+                reasoning_effort=(event.metadata or {}).get("reasoning_effort"),
+                model_alias=(event.metadata or {}).get("model_alias"),
                 persist_user_message=prepared.persist_user_message,
                 persist_user_timestamp=prepared.persist_user_timestamp,
                 persist_user_display_kind=prepared.persist_user_display_kind,
@@ -411,13 +413,29 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
         Call via ``asyncio.to_thread``: resolution can block (credential refresh, context-length
         probes), and the scope is entered here so contextvars behave in the worker thread."""
         with self._profile_scope_for_source(source):
-            return self._format_session_info()
+            return self._format_session_info(source)
 
-    def _format_session_info(self) -> str:
-        """Model / provider / context-length / endpoint block so users can spot bad context detection."""
+    def _format_session_info(self, source: Optional[SessionSource] = None) -> str:
+        """Model / provider / context-length / endpoint block so users can spot bad context detection.
+
+        When ``source`` has a channel/thread override, the advertised model
+        and provider reflect the pinned channel config instead of the global
+        default (local patch)."""
         from gateway.run import _resolve_gateway_model_context
         resolved = _resolve_gateway_model_context()
+        model = resolved.model
+        provider = resolved.provider
         context_length = resolved.context_length
+        try:
+            from gateway.run import _channel_override_for_source
+            _ch = _channel_override_for_source(getattr(self, "config", None), source)
+        except Exception:
+            _ch = None
+        if _ch is not None:
+            if _ch.model:
+                model = _ch.model
+            if _ch.provider:
+                provider = _ch.provider
         ctx_source = {
             "config": "config",
             "default": "default — set model.context_length in config to override",
@@ -427,8 +445,8 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
             else f"{context_length // 1_000}K" if context_length >= 1_000 else str(context_length)
         )
         lines = [
-            t("gateway.session.info_model", model=resolved.model),
-            t("gateway.session.info_provider", provider=resolved.provider or "openrouter"),
+            t("gateway.session.info_model", model=model),
+            t("gateway.session.info_provider", provider=provider or "openrouter"),
             t("gateway.session.info_context", tokens=ctx_display, source=ctx_source),
         ]
         if (resolved.provider or "") == "moa":
@@ -1098,9 +1116,10 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
         # (global, platform override, or legacy overrides) has asked for no tool progress at all and
         # gets no cards either. Every other explicit mode keeps the card lane.
         _native_slack_task_cards = False
+        # The card lane is for any adapter that advertises it (Slack, Relay with "task_card" in supported_ops).
+        # Note: it turns needs_progress_queue on for that turn even with tool_progress: off (cards carry it).
         if (
-            source.platform == Platform.SLACK
-            and hasattr(adapter, "native_task_cards_enabled")
+            hasattr(adapter, "native_task_cards_enabled")
             and not (_tool_progress_explicit and progress_mode == "off")
         ):
             try:
@@ -1236,8 +1255,8 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
             ),
             platform=source.platform,
         )
-        if _native_slack_task_cards:
-            # chat.startStream in channels requires the recipient team/user pair; harmless elsewhere.
+        if _native_slack_task_cards and source.platform == Platform.SLACK:
+            # chat.startStream in channels requires the recipient team/user pair (Slack keys: Slack only).
             _progress_metadata = dict(_progress_metadata or {})
             if source.scope_id:
                 _progress_metadata.setdefault("recipient_team_id", source.scope_id)
@@ -1968,6 +1987,10 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                 run_generation=run_generation, _interrupt_depth=_interrupt_depth + 1,
                 event_message_id=next_message_id, inbound_message_id=next_inbound_id,
                 channel_prompt=next_channel_prompt, message_type=next_message_type,
+                # A queued relay turn keeps its per-turn picks, like the main path (P4/P6). These metadata keys
+                # are relay-inbound only: _relay_metadata filters the wire, nothing gateway-internal sets them.
+                reasoning_effort=(getattr(pending_event, "metadata", None) or {}).get("reasoning_effort"),
+                model_alias=(getattr(pending_event, "metadata", None) or {}).get("model_alias"),
                 persist_user_message=next_persist_message,
                 persist_user_display_kind=next_display_kind,
                 reply_expected=next_reply_expected,
@@ -2296,6 +2319,8 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
         run_generation: Optional[int] = None, _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None, inbound_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None, moa_config: Optional[dict] = None,
+        reasoning_effort: Optional[str] = None,
+        model_alias: Optional[str] = None,
         persist_user_message: Optional[Any] = None, persist_user_timestamp: Optional[float] = None,
         persist_user_display_kind: Optional[str] = None, message_type: Optional[str] = None,
         persist_user_display_metadata: Optional[dict] = None,
@@ -2342,6 +2367,8 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
             event_message_id=event_message_id, inbound_message_id=inbound_message_id,
             channel_prompt=channel_prompt, moa_config=moa_config,
             title_user_message=title_user_message,
+            reasoning_effort=reasoning_effort,
+            model_alias=model_alias,
             persist_user_message=persist_user_message,
             persist_user_timestamp=persist_user_timestamp,
             persist_user_display_kind=persist_user_display_kind,

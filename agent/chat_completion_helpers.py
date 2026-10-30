@@ -3045,6 +3045,12 @@ class _StreamingCall(StreamingWaitMonitor):
         finish_reason = model_name = usage_obj = None
         response_id = upstream_provider = None  # the provider's own id / serving upstream, from the chunks
         role = "assistant"
+        # Local patch: raw tail of the stream, logged when a drop warning fires
+        # so a real network drop can be told apart from a parser gap.
+        from collections import deque as _deque
+        _last_chunks = _deque(maxlen=3)
+        self._drop_diag_chunks = _last_chunks
+        self._drop_diag_pending = pending_text_parts
         _diag = self._new_diag()
         self._writer_token = self._attempt_request_client = self._attempt_stream_response = None
         from agent.chat_completion_helpers_relay import RelayChatAccumulator
@@ -3094,6 +3100,7 @@ class _StreamingCall(StreamingWaitMonitor):
 
         for chunk in _iter_provider_stream_chunks(stream, response=lambda: self._attempt_stream_response):
             is_progress = self._take_chunk(_diag, chunk, llamacpp)
+            _last_chunks.append(chunk)  # local patch: drop diagnostics
             if self.agent._interrupt_requested:
                 _close_half_read_stream("interrupt_stream_close_failed")
                 break
@@ -3333,7 +3340,12 @@ class _StreamingCall(StreamingWaitMonitor):
             # A usage object proves the provider finished (include_usage's final chunk).
             logger.warning(
                 "Clean EOF, no finish_reason: server ended the stream (no transport exception) after delivering "
-                "text with no tool calls. The server or a proxy closed the stream cleanly.")
+                "text with no tool calls. The server or a proxy closed the stream cleanly. "
+                "last_chunks=%s pending_text=%r content_tail=%r",
+                [repr(c)[:400] for c in getattr(self, "_drop_diag_chunks", ())],
+                "".join(getattr(self, "_drop_diag_pending", []))[-200:],
+                (full_content or "")[-200:],
+            )
             return _build_partial_stream_stub(role, full_content, full_reasoning, model_name, usage_obj, clean_eof=True)
         effective_finish_reason = "length" if has_truncated_tool_args else (finish_reason or "stop")
         provider_stream_error = _provider_stream_error_from_text(

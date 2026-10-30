@@ -96,6 +96,15 @@ def _ws_dial_url(url: str) -> str:
     return raw
 
 
+_RELAY_CHANNEL_PROMPT_MAX = 24_000  # chars; the hub sends project instructions (<= 20k) + pinned file names, capped alike
+
+
+def _relay_channel_prompt(value: Any) -> Optional[str]:
+    """Inbound ``channel_prompt`` (the connector's per-chat instructions, an ephemeral system-prompt suffix):
+    a non-empty string, capped; anything else is dropped."""
+    return value[:_RELAY_CHANNEL_PROMPT_MAX] if isinstance(value, str) and value.strip() else None
+
+
 def _render_relay_context(context: Any) -> Optional[str]:
     """Flatten the connector's read-only ``context`` list (oldest→newest) into the
     ``MessageEvent.channel_context`` string history-backfill already uses.
@@ -142,6 +151,28 @@ def _normalize_slack_parent_command(text: str, message_type: MessageType) -> tup
 
     normalized_type = MessageType.COMMAND if normalized.startswith("/") else MessageType.TEXT
     return normalized, normalized_type
+
+
+# The app's per-chat reasoning level (and fast voice turns). "none" disables thinking; "max"/"ultra" never cross the
+# wire (provider-specific, costly). parse_reasoning_effort rejects anything else anyway.
+_RELAY_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+
+
+def _relay_metadata(meta: Any) -> dict[str, Any]:
+    """Inbound ``metadata`` -> ``MessageEvent.metadata``: only an allowed ``reasoning_effort``/``model_alias`` crosses
+    the wire; other event-metadata keys steer session routing and must stay gateway-internal."""
+    out: dict[str, Any] = {}
+    if not isinstance(meta, dict):
+        return out
+    effort = meta.get("reasoning_effort")
+    effort = effort.strip().lower() if isinstance(effort, str) else None
+    if effort in _RELAY_REASONING_EFFORTS:
+        out["reasoning_effort"] = effort
+    alias = meta.get("model_alias")
+    alias = alias.strip().lower() if isinstance(alias, str) else None
+    if alias and len(alias) <= 64:  # a config.yaml model_aliases key; run_sync checks it is eligible
+        out["model_alias"] = alias
+    return out
 
 
 def _media_types_from_wire(raw: dict[str, Any]) -> list[str]:
@@ -232,6 +263,7 @@ def _event_from_wire(raw: dict[str, Any]) -> MessageEvent:
         message_type=msg_type,
         source=source,
         message_id=raw.get("message_id"),
+        metadata=_relay_metadata(raw.get("metadata")),
         reply_to_message_id=raw.get("reply_to_message_id"),
         reply_to_text=reply_to.get("text"),
         reply_to_author_name=reply_to.get("author"),
@@ -241,6 +273,7 @@ def _event_from_wire(raw: dict[str, Any]) -> MessageEvent:
         # media_types[i] FIRST (routes a relayed image/document/voice like native).
         media_types=_media_types_from_wire(raw),
         channel_context=_render_relay_context(raw.get("context")),
+        channel_prompt=_relay_channel_prompt(raw.get("channel_prompt")),
         # Structured interactive-prompt reply, verbatim off the wire; the adapter
         # consumes it to resolve pending approvals/confirms/clarifies.
         prompt_response=dict(prompt_response) if isinstance(prompt_response, dict) else None,

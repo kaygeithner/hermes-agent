@@ -102,6 +102,44 @@ def _spill_full_stdout(stdout_text: str) -> Optional[str]:
         return None
 
 
+def _child_cache_redirect_env() -> dict[str, str]:
+    """Return cache redirects only when their local base can be prepared."""
+    from agent.cache_redirect import cache_redirect_env, hermes_home_cache_base
+
+    base = hermes_home_cache_base()
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        logger.debug(
+            "execute_code: cache redirect skipped (could not prepare %s)",
+            base,
+            exc_info=True,
+        )
+        return {}
+    return cache_redirect_env(base)
+
+
+def _apply_child_cache_redirect_defaults(child_env: dict[str, str]) -> None:
+    """Inject redirects without clobbering explicit passthrough values."""
+    for key, value in _child_cache_redirect_env().items():
+        child_env.setdefault(key, value)
+
+
+def _sandbox_cache_env(sandbox_dir: str) -> dict[str, str]:
+    """Cache locations scoped to a remote sandbox (local patch)."""
+    base = f"{sandbox_dir}/.caches"
+    return {
+        "PYTHONPYCACHEPREFIX": f"{base}/pycache",
+        "MYPY_CACHE_DIR": f"{base}/mypy",
+        "RUFF_CACHE_DIR": f"{base}/ruff",
+    }
+
+
+def _sandbox_cache_env_prefix(sandbox_dir: str) -> str:
+    """Return shell-safe cache assignments scoped to a remote sandbox."""
+    return " ".join(f"{key}={shlex.quote(value)}" for key, value in _sandbox_cache_env(sandbox_dir).items())
+
+
 def check_sandbox_requirements() -> bool:
     """check_fn: available unless the vercel_sandbox backend fails its own checks."""
     if not SANDBOX_AVAILABLE:
@@ -623,7 +661,8 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
         # files, and user code keeps the remote's default file modes.
         launch_cmd = _ship_env_file_and_launch(
             env, sandbox_dir, "sandbox.env", "exec python3 script.py",
-            rpc_dir=f"{sandbox_dir}/rpc", rpc_token=rpc_token)
+            rpc_dir=f"{sandbox_dir}/rpc", rpc_token=rpc_token,
+            **_sandbox_cache_env(sandbox_dir))  # local patch: sandbox-scoped caches
         logger.info("Executing code on %s backend (task %s)...", env_type, effective_task_id[:8])
         script_result = env.execute(launch_cmd, timeout=timeout)
         stdout_text = script_result.get("output", "") or ""
