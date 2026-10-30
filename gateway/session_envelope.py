@@ -33,6 +33,9 @@ _WHATSAPP_METADATA = frozenset({'whatsapp_native_type', 'whatsapp_native', 'what
 _WHATSAPP_NATIVE_KEYS = frozenset({'video', 'audio', 'sticker', 'location', 'contact', 'contacts',
                                    'reaction', 'poll', 'pollUpdate'})
 _WHATSAPP_NATIVE_MAX_BYTES = 16 * 1024
+# Local patch: the app relay's per-turn picks (ws_transport._relay_metadata already filters them);
+# run_turn reads them from event.metadata, so they must cross admission and survive replay.
+_RELAY_METADATA = frozenset({'reasoning_effort', 'model_alias'})
 _MEDIA_FIELDS = ('media_urls', 'media_types', 'media_text_inlined')
 
 
@@ -42,6 +45,9 @@ def _native_metadata(event):
     metadata = event.metadata
     if not metadata:
         return {}
+    if (isinstance(metadata, dict) and event.source.platform.value == 'relay' and set(metadata) <= _RELAY_METADATA
+            and all(isinstance(value, str) and 0 < len(value) <= 64 for value in metadata.values())):
+        return dict(metadata)
     if (not isinstance(metadata, dict) or event.source.platform.value != 'whatsapp'
             or not set(metadata) <= _WHATSAPP_METADATA):
         return None

@@ -121,9 +121,26 @@ async def test_native_codec_closed_metadata_contract_and_reply_expected(tmp_path
     # Closed producer matrix: no other adapter stamps MessageEvent.metadata on ordinary inbound,
     # so the WhatsApp keys above are the whole contract. A new producer must extend it here.
     producers = set()
-    for path in [*REPO.glob('gateway/platforms/**/*.py'), *REPO.glob('plugins/platforms/**/*.py')]:
+    for path in [*REPO.glob('gateway/platforms/**/*.py'), *REPO.glob('gateway/relay/**/*.py'),
+                 *REPO.glob('plugins/platforms/**/*.py')]:
         for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
             if (isinstance(node, ast.Call) and getattr(node.func, 'id', getattr(node.func, 'attr', '')) == 'MessageEvent'
                     and any(k.arg == 'metadata' for k in node.keywords)):
                 producers.add(path.relative_to(REPO).as_posix())
-    assert producers == {'plugins/platforms/whatsapp/adapter.py'}, producers
+    assert producers == {'plugins/platforms/whatsapp/adapter.py', 'gateway/relay/ws_transport.py'}, producers
+
+
+def test_relay_per_turn_picks_cross_native_admission():
+    # Local patch: the app's per-chat effort/model (ws_transport._relay_metadata) must reach the turn, not refuse it.
+    from types import SimpleNamespace
+    from gateway.session_envelope import _native_metadata
+
+    def event(platform, metadata):
+        return SimpleNamespace(metadata=metadata, source=SimpleNamespace(platform=platform))
+    picks = {'reasoning_effort': 'high', 'model_alias': 'gpt'}
+    assert _native_metadata(event(Platform.RELAY, picks)) == picks
+    assert _native_metadata(event(Platform.RELAY, {'reasoning_effort': 'none'})) == {'reasoning_effort': 'none'}
+    for bad in ({'gateway_session_id': 's'}, {**picks, 'internal': True}, {'reasoning_effort': 1},
+                {'model_alias': 'x' * 65}, {'model_alias': ''}):
+        assert _native_metadata(event(Platform.RELAY, bad)) is None, bad
+    assert _native_metadata(event(Platform.WHATSAPP, picks)) is None
