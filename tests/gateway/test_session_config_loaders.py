@@ -36,7 +36,8 @@ def test_in_process_turn_routes_with_the_sessions_own_provider_routing(tmp_path,
     turn = TurnRunner.__new__(TurnRunner)
     turn._runner = runner
     turn._ctx = SimpleNamespace(source=SimpleNamespace(platform=Platform.LOCAL, chat_id='c'), session_key='k',
-                                user_config={}, message='hi', inbound_message_id=None, enabled_toolsets=[])
+                                user_config={}, message='hi', inbound_message_id=None, enabled_toolsets=[],
+                                model_alias=None, reasoning_effort=None)  # relay per-turn fields (local patch)
     turn._combined_ephemeral_prompt = lambda: None
     turn._setup_stream_consumer = lambda platform_key: (None, None, None, False)
 

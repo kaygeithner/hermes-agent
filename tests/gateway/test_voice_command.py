@@ -668,6 +668,8 @@ class TestDiscordVoiceChannelMethods:
         adapter.platform = Platform.DISCORD
         adapter.config = config
         adapter._client = MagicMock()
+        adapter._typing_tasks = {}  # disconnect() drains typing loops + lease (local typing-lease patch)
+        adapter._typing_lease = {}
         adapter._voice_clients = {}
         adapter._voice_locks = {}
         adapter._voice_text_channels = {}
