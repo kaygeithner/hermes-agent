@@ -102,44 +102,6 @@ def _spill_full_stdout(stdout_text: str) -> Optional[str]:
         return None
 
 
-def _child_cache_redirect_env() -> dict[str, str]:
-    """Return cache redirects only when their local base can be prepared."""
-    from agent.cache_redirect import cache_redirect_env, hermes_home_cache_base
-
-    base = hermes_home_cache_base()
-    try:
-        os.makedirs(base, exist_ok=True)
-    except Exception:
-        logger.debug(
-            "execute_code: cache redirect skipped (could not prepare %s)",
-            base,
-            exc_info=True,
-        )
-        return {}
-    return cache_redirect_env(base)
-
-
-def _apply_child_cache_redirect_defaults(child_env: dict[str, str]) -> None:
-    """Inject redirects without clobbering explicit passthrough values."""
-    for key, value in _child_cache_redirect_env().items():
-        child_env.setdefault(key, value)
-
-
-def _sandbox_cache_env(sandbox_dir: str) -> dict[str, str]:
-    """Cache locations scoped to a remote sandbox (local patch)."""
-    base = f"{sandbox_dir}/.caches"
-    return {
-        "PYTHONPYCACHEPREFIX": f"{base}/pycache",
-        "MYPY_CACHE_DIR": f"{base}/mypy",
-        "RUFF_CACHE_DIR": f"{base}/ruff",
-    }
-
-
-def _sandbox_cache_env_prefix(sandbox_dir: str) -> str:
-    """Return shell-safe cache assignments scoped to a remote sandbox."""
-    return " ".join(f"{key}={shlex.quote(value)}" for key, value in _sandbox_cache_env(sandbox_dir).items())
-
-
 def check_sandbox_requirements() -> bool:
     """check_fn: available unless the vercel_sandbox backend fails its own checks."""
     if not SANDBOX_AVAILABLE:
@@ -661,8 +623,7 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
         # files, and user code keeps the remote's default file modes.
         launch_cmd = _ship_env_file_and_launch(
             env, sandbox_dir, "sandbox.env", "exec python3 script.py",
-            rpc_dir=f"{sandbox_dir}/rpc", rpc_token=rpc_token,
-            **_sandbox_cache_env(sandbox_dir))  # local patch: sandbox-scoped caches
+            rpc_dir=f"{sandbox_dir}/rpc", rpc_token=rpc_token)
         logger.info("Executing code on %s backend (task %s)...", env_type, effective_task_id[:8])
         script_result = env.execute(launch_cmd, timeout=timeout)
         stdout_text = script_result.get("output", "") or ""
@@ -701,40 +662,43 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[l
     """Run code on the remote terminal backend: the owner's persistent remote session kernel
     (tools/code_kernel_remote.py) first, else the per-call script ship — the fail-open route when
     a kernel cannot be spawned and the only route for hosts that cannot sustain a background process."""
+    from tools.terminal_tool import _resolve_container_task_id
+    from tools.terminal_tool_lifecycle import _call_in_flight
     _cfg = _load_config()
     timeout, max_tool_calls = _cfg.get("timeout", DEFAULT_TIMEOUT), _cfg.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS)
     sandbox_tools, effective_task_id = _sandbox_tools_for(enabled_tools), task_id or "default"
     env, env_type = _get_or_create_env(effective_task_id)
-    exec_start = time.monotonic()
-    try:
-        py_check = env.execute("command -v python3 >/dev/null 2>&1 && echo OK", cwd="/", timeout=15)
-        if "OK" not in py_check.get("output", ""):
-            return _error_result(f"Python 3 is not available in the {env_type} terminal "
-                                 "environment. Install Python to use execute_code with remote backends.")
-        # Session-kernel path: one persistent kernel per owner on the
-        # run-to-completion transport. Spawn failure falls OPEN to the per-call
-        # path below so a degraded remote host never blocks execution.
+    with _call_in_flight(_resolve_container_task_id(effective_task_id)):
+        exec_start = time.monotonic()
         try:
-            # --- Session-kernel path (hermes-agent#96873) ------------------- Same always-on model as
-            # local: one persistent kernel per owner, rebuilt on the run-to-completion transport (detached
-            # runner + file cell protocol).
-            from tools.code_kernel_remote import execute_in_remote_kernel
-            kernel_result = execute_in_remote_kernel(
-                code, env=env, env_type=env_type, task_env_id=effective_task_id,
-                sandbox_tools=frozenset(sandbox_tools), timeout=timeout,
-                max_tool_calls=max_tool_calls, reset=bool(reset),
-                idle_exit=int(_cfg.get("kernel_idle_timeout", 1800)),
-            )
-        except Exception:
-            logger.warning("remote session-kernel path failed; falling back to per-call", exc_info=True)
-            kernel_result = None
-        if kernel_result is not None:
-            return _finish_remote_kernel_result(kernel_result, timeout=timeout, exec_start=exec_start)
-        logger.info("remote session kernel unavailable on %s; using per-call path", env_type)
-    except Exception as exc:
-        return _remote_failure(exc, exec_start, 0)
-    return _run_remote_per_call(env, env_type, code, effective_task_id, sandbox_tools,
-                                timeout=timeout, max_tool_calls=max_tool_calls, exec_start=exec_start)
+            py_check = env.execute("command -v python3 >/dev/null 2>&1 && echo OK", cwd="/", timeout=15)
+            if "OK" not in py_check.get("output", ""):
+                return _error_result(f"Python 3 is not available in the {env_type} terminal "
+                                     "environment. Install Python to use execute_code with remote backends.")
+            # Session-kernel path: one persistent kernel per owner on the
+            # run-to-completion transport. Spawn failure falls OPEN to the per-call
+            # path below so a degraded remote host never blocks execution.
+            try:
+                # --- Session-kernel path (hermes-agent#96873) ------------------- Same always-on model as
+                # local: one persistent kernel per owner, rebuilt on the run-to-completion transport (detached
+                # runner + file cell protocol).
+                from tools.code_kernel_remote import execute_in_remote_kernel
+                kernel_result = execute_in_remote_kernel(
+                    code, env=env, env_type=env_type, task_env_id=effective_task_id,
+                    sandbox_tools=frozenset(sandbox_tools), timeout=timeout,
+                    max_tool_calls=max_tool_calls, reset=bool(reset),
+                    idle_exit=int(_cfg.get("kernel_idle_timeout", 1800)),
+                )
+            except Exception:
+                logger.warning("remote session-kernel path failed; falling back to per-call", exc_info=True)
+                kernel_result = None
+            if kernel_result is not None:
+                return _finish_remote_kernel_result(kernel_result, timeout=timeout, exec_start=exec_start)
+            logger.info("remote session kernel unavailable on %s; using per-call path", env_type)
+        except Exception as exc:
+            return _remote_failure(exc, exec_start, 0)
+        return _run_remote_per_call(env, env_type, code, effective_task_id, sandbox_tools,
+                                    timeout=timeout, max_tool_calls=max_tool_calls, exec_start=exec_start)
 
 
 # ---- Main entry point ----
