@@ -26,8 +26,9 @@ logger = logging.getLogger("cron.scheduler")
 # Validates user-supplied delivery platform names, preventing env-var enumeration via crafted names.
 # Plugin platforms are known through ``PlatformEntry.cron_deliver_env_var``; these rows have none:
 # ``webhook`` is core-only and ``wecom_callback`` (a ``wecom`` plugin sibling) delivers only to its
-# config.yaml ``home_channel``.
-_KNOWN_DELIVERY_PLATFORMS = frozenset({"webhook", "wecom_callback"})
+# config.yaml ``home_channel``. ``relay`` is a builtin entry without a home-channel env var, but
+# explicit ``deliver=relay:<chat>`` targets are valid (local transplant patch).
+_KNOWN_DELIVERY_PLATFORMS = frozenset({"webhook", "wecom_callback", "relay"})
 
 # Gateway platforms whose adapter declares ``supports_async_delivery = False`` (request/response
 # only, ``send()`` is a stub) — a cron report can never reach them, so they are never a
