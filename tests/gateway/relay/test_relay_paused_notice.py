@@ -2,7 +2,8 @@
 
 ``RelayAdapter._on_inbound`` commits a chat message through ``admit_relay_delivery``; the session
 authority's drain runs it. When the drain cannot claim the FIFO head it ``_pause``s the session
-(``profile_mismatch`` after the v0.23.0 restart, an unknown lost turn, a refused re-authorization...).
+(``profile_mismatch`` on a queued row whose stored seal no longer verifies, an unknown lost turn, a refused
+re-authorization...).
 A messaging adapter's waiter is released with the reason and its user is told (``pause_notice``). A
 producer-admitted relay row has no waiter, so nothing was sent: the hub saw no reply and no done, and
 timed the turn out 37 minutes later.
