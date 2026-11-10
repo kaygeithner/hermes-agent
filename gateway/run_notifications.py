@@ -68,6 +68,7 @@ _SELF_CLEARING_STORAGE_CAUSES = frozenset({"compression", "compression_closed", 
 # Process-watcher retries of a refused completion: ~5 min at the default 5 s check interval.
 _MAX_COMPLETION_INJECTION_ATTEMPTS = 8
 _COMPLETION_INJECTION_RETRY_MAX_DELAY = 60
+_REFUSED_RESULT_NOTICE_ATTEMPT = 10  # the 10th non-permanent refusal in a row (~6 min of backoff) posts the result as a plain notice
 # Drain retries of a refused watch event follow the same bounded-backoff policy, keyed to the
 # 2 s drain cadence instead of the watcher's check interval (#140899).
 _WATCH_INJECTION_RETRY_BASE_DELAY = 4.0
@@ -770,6 +771,12 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                     except Exception:
                         logger.exception("Watch notification injection error")
                         delivered = False
+                    reason = evt.pop("_refusal_reason", None)  # P8: never leaks into the next attempt
+                    if (delivered is False and reason and not evt.get("_refusal_permanent")
+                            and self._count_transient_refusal(evt, reason) >= _REFUSED_RESULT_NOTICE_ATTEMPT
+                            and await self._post_refused_result_notice(
+                                synth_text, evt, reason, evt["_transient_refusals"])):
+                        delivered = True  # P8: posted as a plain notice; the event is finished
             # The original event: a requeued tick folds again from what is still queued.
             if delivered is False:
                 self._requeue_refused_watch_event(completion_queue, evt)
@@ -1026,6 +1033,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 return None
             if not raise_not_accepted:
                 queued["_refusal_permanent"] = exc.permanent  # the drain counts only permanent refusals
+                queued["_refusal_reason"] = exc.reason or "not_accepted"  # P8: plain-notice fallback after repeated refusals
             logger.warning("Watch notification not admitted for %s chat=%s: %s",
                            platform_name, source.chat_id, exc)
             # Durable callers refund the claim; ordinary watch callers just requeue.
@@ -1301,6 +1309,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
     async def _deliver_completion_notification_scoped(
         self, synth_text: str, evt: dict, *, sibling_claims=(),
     ) -> Optional[bool]:
+        queued = evt  # P8: the caller's dict, which the watcher requeues (evt is reassigned below)
         from gateway.session_local_recovery import restore_completion_route
         from gateway.wake import WakeNotAccepted
         from tools.process_registry_notifications import should_surface_notification
@@ -1345,6 +1354,20 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             # A proven-permanent refusal spends its durable attempt, so the row converges to
             # ``dropped`` across restarts too (#141153); any other (restart wait, full FIFO, an owner
             # not yet proven) is refunded and never drops a completion the owner will take later.
+            if not exc.permanent:
+                reason = exc.reason or "not_accepted"
+                count = self._count_transient_refusal(queued, reason)
+                if count >= _REFUSED_RESULT_NOTICE_ATTEMPT and self._completion_committed(evt):
+                    accepted = True  # P8: the last refusal was a lost ACK; the turn is committed, no notice
+                    return True
+                if count >= _REFUSED_RESULT_NOTICE_ATTEMPT and await self._post_refused_result_notice(
+                        synth_text, evt, reason, count):
+                    # P8: the notice is the delivery; the finally settles every claim "complete", never re-offered.
+                    accepted = True
+                    if identity is not None:
+                        with self._completion_delivery_lock:
+                            self._mark_completions_delivered_locked((identity,))
+                    return True
             refused = not exc.permanent
             return False
         finally:
@@ -1605,6 +1628,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             "response. If a result does not change the current conclusion, absorb it silently.]"
         )
         consolidated = "\n\n".join([header, *blocks])
+        queued_primary = primary_evt
         if getattr(self, 'session_authority', None) is not None:
             from gateway.session_automation import producer_identity
             primary_evt = dict(primary_evt, _automation_identities=[
@@ -1612,6 +1636,9 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         delivered = await self._deliver_completion_notification(
             consolidated, primary_evt, sibling_claims=siblings,
         )
+        if primary_evt is not queued_primary and "_transient_refusals" in primary_evt:
+            # P8: the refusal count lives on the dict the watcher requeues, not on this copy
+            queued_primary["_transient_refusals"] = primary_evt["_transient_refusals"]
         if delivered is None:
             # Primary dropped/owned elsewhere: retry the unadmitted siblings.
             for evt, _claim_id in siblings:
@@ -1748,6 +1775,82 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         source = await asyncio.to_thread(self._build_process_event_source, watcher)
         adapter = self._resolve_injection_adapter(platform_name, source)
         return session_key in (getattr(adapter, "_active_sessions", None) or {})
+
+    def _completion_committed(self, evt: dict) -> bool:
+        """P8: True when the session authority already holds this completion's admission (a lost ACK)."""
+        if getattr(self, 'session_authority', None) is None:
+            return False
+        from gateway.session_automation import completion_admission
+        try:
+            return completion_admission(self, evt) is not None
+        except Exception:
+            logger.debug("Refused-result notice: admission recheck failed", exc_info=True)
+            return False
+
+    @staticmethod
+    def _count_transient_refusal(evt: dict, reason: str) -> int:
+        """P8: count one non-permanent refusal toward the plain-notice fallback; 0 for a drain refusal
+        (``runtime_draining``: the restart re-offers the result), which never counts."""
+        if reason == "runtime_draining":
+            return 0
+        evt["_transient_refusals"] = count = int(evt.get("_transient_refusals") or 0) + 1
+        return count
+
+    async def _post_refused_result_notice(self, synth_text: str, evt: dict, reason: str, attempts: int) -> bool:
+        """P8: post a repeatedly-refused background result to its chat as a plain notice."""
+        from gateway.run import _non_conversational_metadata, _redact_gateway_user_facing_secrets
+        try:
+            source = await asyncio.to_thread(self._build_process_event_source, evt)
+            if source is None:
+                return False
+            platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
+            adapter = self._resolve_injection_adapter(platform_name, source)
+        except Exception:
+            logger.debug("Refused-result notice: no route for %s", evt.get("session_key"), exc_info=True)
+            return False
+        if adapter is None or not source.chat_id:
+            return False
+        body = _redact_gateway_user_facing_secrets(
+            synth_text.rstrip().removesuffix(INTERNAL_NOTIFICATION_FOOTER).rstrip())
+        text = (
+            f"[Background result: the agent session refused it {attempts} times ({reason}), so it is posted "
+            "here as a notice. The assistant has not answered it yet; reply to continue from it.]\n\n" + body
+        )
+        try:
+            result = await adapter.send(
+                source.chat_id, text,
+                metadata=_non_conversational_metadata(
+                    {"thread_id": source.thread_id} if source.thread_id else None, platform=platform_name),
+            )
+        except Exception:
+            logger.warning("Refused-result notice send failed for %s chat=%s", platform_name, source.chat_id,
+                           exc_info=True)
+            return False
+        if getattr(result, "success", True) is False:
+            return False
+        route = str(evt.get("session_key") or "")
+        try:
+            entry = self.session_store.lookup_by_session_key(route)
+            holder = getattr(entry, "session_id", None) or "none"
+        except Exception:
+            holder = "none"
+        logger.warning(
+            "Background result for %s chat=%s (type=%s id=%s) was refused %d times (%s): route %s is held by "
+            "session %s, the result is pinned to session %s; posted it to the chat as a plain notice",
+            platform_name, source.chat_id, evt.get("type") or "?",
+            evt.get("delegation_id") or evt.get("session_id"), attempts, reason, route, holder,
+            evt.get("parent_session_id") or evt.get("proven_session_id") or "none",
+        )
+        from gateway import mirror as _mirror
+        try:
+            await asyncio.to_thread(
+                lambda: _mirror.mirror_to_session(
+                    platform_name, str(source.chat_id), text, source_label="refused_result_notice",
+                    thread_id=source.thread_id, user_id=source.user_id, role="user",
+                    session_id=holder if holder != "none" else None))
+        except Exception:
+            logger.debug("Refused-result notice mirror failed", exc_info=True)
+        return True
 
     async def _send_watcher_message(self, platform_name: str, chat_id, thread_id, message_text: str, watcher: dict) -> None:
         from gateway.run import _non_conversational_metadata

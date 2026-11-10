@@ -147,8 +147,9 @@ def _route_gone(runner, entry):
 async def test_refused_notice_backs_off_and_only_a_permanent_refusal_drops(monkeypatch, caplog, refusal):
     """A refused watch notice is retried on a bounded backoff, never on every 2 s tick (#140899). A
     proven-permanent refusal (``not_found``: the route holds no session) drops it at the cap. A
-    notice pinned to another chat's live session (``admission_conflict``) or refused by a restart's
-    after-turn wait (``runtime_draining``) is never dropped: it waits however long it takes."""
+    notice pinned to another chat's live session (``admission_conflict``) is posted as a plain notice
+    after 10 refusals (P8); one refused by a restart's after-turn wait (``runtime_draining``) is never
+    dropped: it waits however long it takes."""
     from gateway import run_notifications
     from gateway.run_notifications import _MAX_COMPLETION_INJECTION_ATTEMPTS
     runner, authority, entry = await _gateway(monkeypatch)
@@ -175,6 +176,15 @@ async def test_refused_notice_backs_off_and_only_a_permanent_refusal_drops(monke
             assert pending.empty()
             assert refused == _MAX_COMPLETION_INJECTION_ATTEMPTS
             assert sum('dropping the queued event' in m for m in messages) == 1
+            return
+        if refusal == 'foreign':
+            # P8: a foreign-pinned notice is no longer re-offered forever: the 10th refusal in a row posts
+            # it to its own chat as a plain notice, once, with a WARNING naming both sessions.
+            assert pending.empty()
+            assert refused == 10
+            notices = [m for m in messages if 'posted it to the chat as a plain notice' in m]
+            assert len(notices) == 1 and pinned in notices[0] and entry.session_id in notices[0]
+            assert not [m for m in messages if 'dropping the queued event' in m]
             return
         assert not pending.empty(), 'a notice whose refusal may still clear is never dropped'
         assert 20 < refused < 60, 'retries are spaced out (capped at 60 s), not attempted every tick'
