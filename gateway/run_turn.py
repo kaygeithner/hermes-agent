@@ -37,6 +37,7 @@ from gateway.session import (
 )
 from gateway.session_transcript import TranscriptReadError
 from gateway.turn_context import TurnContext
+from gateway.relay_model_pick import turn_model_alias
 from gateway.turn_lease import DEFAULT_LEASE_WAIT, TurnLeaseTimeoutError
 from hermes_constants import get_hermes_home_override
 from pathlib import Path
@@ -257,7 +258,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
                 channel_prompt=_turn_channel_prompt, moa_config=getattr(event, "_moa_config", None),
                 title_user_message=prepared.title_user_message,
                 reasoning_effort=(event.metadata or {}).get("reasoning_effort"),
-                model_alias=(event.metadata or {}).get("model_alias"),
+                model_alias=turn_model_alias(event, session_key),  # P7: injected turns inherit the chat's pick
                 persist_user_message=prepared.persist_user_message,
                 persist_user_timestamp=prepared.persist_user_timestamp,
                 persist_user_display_kind=prepared.persist_user_display_kind,
@@ -1828,7 +1829,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
                 # A queued relay turn keeps its per-turn picks, like the main path (P4/P6). These metadata keys
                 # are relay-inbound only: _relay_metadata filters the wire, nothing gateway-internal sets them.
                 reasoning_effort=(getattr(pending_event, "metadata", None) or {}).get("reasoning_effort"),
-                model_alias=(getattr(pending_event, "metadata", None) or {}).get("model_alias"),
+                model_alias=turn_model_alias(pending_event, next_session_key),
                 persist_user_message=next_persist_message,
                 persist_user_display_kind=next_display_kind,
                 reply_expected=next_reply_expected,

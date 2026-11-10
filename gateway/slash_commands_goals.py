@@ -100,6 +100,10 @@ class GatewayGoalCommandsMixin:
                     channel_prompt=event.channel_prompt if kickoff else None,
                     auto_skill=event.auto_skill if kickoff else None,
                     inherit_channel_pin=not kickoff,
+                    # P7: the kickoff is the human's /goal turn, so it carries their relay model pick
+                    # (only a real str: admission refuses relay metadata with a None value)
+                    metadata={"model_alias": alias} if kickoff and isinstance(
+                        alias := (event.metadata or {}).get("model_alias"), str) and alias else {},
                 )
                 self._enqueue_fifo(quick_key, turn, adapter)
         except Exception as exc:
