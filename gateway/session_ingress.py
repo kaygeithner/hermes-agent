@@ -242,6 +242,12 @@ def pause_notice(authority, ref, reason):
     if live.pause_notified:
         return None
     live.pause_notified = True
+    return pause_text(live.source, reason)
+
+
+def pause_text(source, reason):
+    """The words a chat gets for a pause: what happened, and what its owner can do about it. Also the
+    relay's and webhook's (``session_producer_lifecycle.tell_paused_producer``), which have no waiter."""
     if reason == 'runtime_draining':
         # Transient: the row runs when the restarted owner drains it, so /reset would be wrong advice.
         return '⏳ Hermes is restarting — your message is saved and will be answered when it is back.'
@@ -252,7 +258,7 @@ def pause_notice(authority, ref, reason):
         # GW-10: the way out is in this chat. /discard acknowledges the lost turn (never replayed)
         # through the same fenced resolve_unknown as Desktop/TUI, and the saved messages then run.
         # Slack registers no native /discard (its slash cap): the umbrella `/hermes discard` reaches it.
-        slack = getattr(getattr(live.source, 'platform', None), 'value', None) == 'slack'
+        slack = getattr(getattr(source, 'platform', None), 'value', None) == 'slack'
         discard = '/hermes discard' if slack else '/discard'
         return ('⏸️ This conversation is paused: a previous turn did not finish when Hermes restarted, '
                 f'and only you know whether to send it again. Your message is saved. Send {discard} to drop '

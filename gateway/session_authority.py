@@ -20,7 +20,7 @@ from gateway.session_contract import (
 )
 from gateway.session_events import SessionEvents
 from gateway.session_pending_controls import PendingControls
-from gateway.session_producer_lifecycle import drop_producer_turn, mark_producer_admission
+from gateway.session_producer_lifecycle import drop_producer_turn, mark_producer_admission, tell_paused_producer
 from hermes_cli.observability.shared_metrics_busy import busy_row_settled
 from hermes_state_runtime import (
     STEERING, RuntimeStoreError, admit_session_input, begin_runtime_epoch,
@@ -508,6 +508,7 @@ class SessionAuthority:
         waiting for the answer instead of reporting accepted work as a conflict."""
         for row in list_session_admissions(self.db, session_id=ref.session_id):
             admission_id = row['admission_id']
+            tell_paused_producer(self, ref, admission_id, reason)  # relay/webhook rows have no waiter
             if reason == 'session_busy' and admission_id not in self.native_waiters:
                 continue
             self.native_waiters.discard(admission_id)

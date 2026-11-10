@@ -12,27 +12,90 @@ own adapter task already brackets it):
 - typing lives as long as execution, so it stops before the reply is sent (#117300 pauses it there);
 - the outcome is reported once: an interrupted turn as CANCELLED and a failed one as FAILURE when
   execution ends; a completed one after its settlement, by the reply's send (``deliver_settled``),
-  or as FAILURE when settlement dropped the reply (``drop_producer_turn``).
+  or as FAILURE when settlement dropped the reply (``drop_producer_turn``);
+- a row the FIFO cannot claim (the session is paused) is answered in its chat (``tell_paused_producer``).
 """
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from gateway.platforms.event import ProcessingOutcome
 
+logger = logging.getLogger(__name__)
+# Pauses that lift on their own: the row still runs, so its turn stays open for the answer to come.
+_LIFTS_ITSELF = ('runtime_draining', 'session_busy')
+
 
 def _turns(authority):
-    """admission id -> None (committed by a producer, not started) or its open ``_Bracket``."""
+    """admission id -> ``_Queued`` (committed by a producer, not started), its open ``_Bracket``, or
+    None (a test double's committed row)."""
     turns = getattr(authority, 'producer_turns', None)
     if turns is None:
         turns = authority.producer_turns = {}
     return turns
 
 
+class _Queued:
+    """A producer row committed and not yet executing, with the delivery event it arrived on: a pause
+    answers its chat from that (the stored row may no longer restore: ``profile_mismatch``). Nothing
+    to close. ``told``: 0 nothing sent, 1 told it waits (transient pause), 2 told it is paused and its
+    turn closed."""
+    closed = True
+
+    def __init__(self, event):
+        self.event, self.told = event, 0
+
+    async def close(self, outcome):
+        return None
+
+
 def mark_producer_admission(authority, event, row):
     """``SessionAuthority._admitted``, in the commit's own tracked task: a producer's freshly queued
     row is the executor's to bracket. A re-send of a row already running or settled is not marked."""
     if getattr(event, '_producer_delivery', False) and row['status'] == 'queued':
-        _turns(authority).setdefault(row['admission_id'], None)
+        _turns(authority).setdefault(row['admission_id'], _Queued(event))
+
+
+def tell_paused_producer(authority, ref, admission_id, reason):
+    """``SessionAuthority._pause``: the FIFO stopped without claiming this row. A messaging adapter's
+    waiter is released with the reason and its user told; a producer's row has none, so a relay chat
+    heard nothing and the sender's turn ran into its timeout. Answer it once per state with the words
+    a messaging user gets (``pause_text``), in the chat, anchored on the message. A pause that does
+    not lift on its own also ends the turn (FAILURE reaction: the hub's done); one that does leaves it
+    open, the row still runs. An adapter that renders no processing hooks (a webhook) has no chat."""
+    entry = _turns(authority).get(admission_id)
+    level = 1 if reason in _LIFTS_ITSELF else 2
+    if not isinstance(entry, _Queued) or entry.told >= level:
+        return
+    from gateway.run_turn_followup_ack import _followup_processing_hooks_apply
+    event = entry.event
+    try:
+        adapter = authority.runner._adapter_for_source(event.source)
+        chat = _followup_processing_hooks_apply(adapter, event)
+        loop = asyncio.get_running_loop()
+    except Exception:  # a notice must never change how the pause itself is handled
+        logger.warning('Pause notice for %s not sent', admission_id, exc_info=True)
+        return
+    if not chat:
+        entry.told, entry.event = 2, None
+        return
+    entry.told = level
+    if level == 2:
+        entry.event = None
+    task = loop.create_task(_tell(authority, adapter, event, reason))
+    adapter._background_tasks.add(task)
+    task.add_done_callback(adapter._background_tasks.discard)
+
+
+async def _tell(authority, adapter, event, reason):
+    from gateway.session_ingress import deliver_response, pause_text
+    try:
+        await deliver_response(adapter, event, authority.runner._session_key_for_source(event.source),
+                               pause_text(event.source, reason))
+    except Exception:
+        logger.warning('Pause notice for %s did not reach its chat', event.source.chat_id, exc_info=True)
+    if reason not in _LIFTS_ITSELF:
+        await adapter._run_processing_hook('on_processing_complete', event, ProcessingOutcome.FAILURE)
 
 
 class _Bracket:
