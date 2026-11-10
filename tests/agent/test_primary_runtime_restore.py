@@ -151,10 +151,14 @@ class TestRestorePrimaryRuntime:
             assert agent._restore_primary_runtime() is False
             assert agent._restore_primary_runtime() is True
 
-        # Exactly one restore notice, emitted only by the successful retry.
-        assert len(emitted) == 1
-        assert "primary-model" in emitted[0]
-        assert "anthropic/claude-sonnet-4" in emitted[0]
+        # Exactly one restore notice, pending only from the successful retry and emitted once the
+        # primary has answered the turn.
+        assert emitted == []
+        agent._emit_pending_fallback_notice()
+        restored = [m for m in emitted if "Primary model restored" in str(m)]  # the first switch's notice is still pending too
+        assert len(restored) == 1
+        assert "primary-model" in restored[0]
+        assert "anthropic/claude-sonnet-4" in restored[0]
 
     def test_resets_fallback_index(self):
         """After restore, the full fallback chain should be available again."""

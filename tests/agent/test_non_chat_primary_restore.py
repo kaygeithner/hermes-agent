@@ -57,7 +57,8 @@ def test_restore_skips_a_primary_already_known_to_be_non_chat():
 
 
 def test_restore_still_returns_a_chat_primary():
-    _agent, restored, emitted = _restore_after_fallback("qwen3.7-plus")
+    agent, restored, emitted = _restore_after_fallback("qwen3.7-plus")
 
     assert restored is True
+    agent._emit_pending_fallback_notice()  # announced once the primary has answered the turn
     assert any("Primary model restored" in notice for notice in emitted)

@@ -244,6 +244,13 @@ class StatusOutputMixin:
         """Surface the one-shot fallback-switch notice on successful recovery: a provider switch is durable
         state operators must see, unlike the retry chatter ``_clear_status_buffer`` drops. Emitted once, then
         cleared; on terminal failure the buffered switch line is flushed instead (``_flush_status_buffer``)."""
+        restored, self._pending_restore_notice = getattr(self, "_pending_restore_notice", None), None
+        if restored:
+            # The primary answered this turn: the restore ``restore_primary_runtime`` made is now true.
+            try:
+                self._emit_diagnostic_status(restored)
+            except Exception:
+                pass  # best-effort, as the fallback notices below
         notice = getattr(self, "_pending_fallback_notice", None)
         if not notice:
             return
@@ -260,6 +267,7 @@ class StatusOutputMixin:
         """Emit buffered retry messages — call on terminal failure so the user sees what was tried."""
         # The buffered trace already carries the switch line; drop the one-shot notice.
         self._pending_fallback_notice = None
+        self._pending_restore_notice = None  # the turn failed: the primary never answered
         buf = getattr(self, "_retry_status_buffer", None)
         if not buf:
             return
