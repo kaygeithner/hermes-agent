@@ -30,6 +30,9 @@ from hermes_state_runtime import (
 
 # Capped backoff for a claim refused by transient storage (writer lock, full disk).
 _CLAIM_RETRY_MIN_S, _CLAIM_RETRY_MAX_S = 0.25, 5.0
+# Preflight refusals that judge the head row's own stored provenance, not the moment (a dropped relay
+# socket is permission_denied, an adapter swap not_found: both lift, so those keep the FIFO paused).
+_ROW_VERDICTS = ('profile_mismatch', 'invalid_params')
 # Longest a settled turn's adapter may hold its adopted crash marker before the follower is claimed.
 _MARKER_RELEASE_WAIT_S = 60.0
 # True in the admitting task once ``admit_native``'s shielded ledger write began: a caller cancelled
@@ -1231,17 +1234,27 @@ class SessionAuthority:
                         from gateway.session_unattended_unknown import settle_unattended_unknown
                         if await settle_unattended_unknown(self, ref):
                             continue
-                    if exc.reason == 'admission_conflict':
+                    if exc.reason == 'admission_conflict' or exc.reason in _ROW_VERDICTS:
                         # A verdict on the head alone (its route or binding moved under it) that every drain
                         # repeats: pausing behind it strands the FIFO for good. Refused only once the same
                         # head conflicted twice, read after each: never a successor a cancel advanced to.
-                        head = next((row['admission_id'] for row in list_session_admissions(
+                        # A verdict on the row's own stored provenance (a seal that no longer verifies) is
+                        # final for an automation row nobody waits on: its successors are a person's, who
+                        # would otherwise never be answered. A person's own row keeps the FIFO paused.
+                        from gateway.session_unattended_unknown import is_unattended
+                        head = next((row for row in list_session_admissions(
                             self.db, session_id=ref.session_id) if row['status'] == 'queued'), None)
-                        if head is not None and head != conflicted:
-                            conflicted = head
+                        if head is not None and exc.reason != 'admission_conflict' and not is_unattended(head):
+                            head = None
+                        if head is not None and head['admission_id'] != conflicted:
+                            conflicted = head['admission_id']
                             continue
                         if head is not None:
-                            refusing = head, exc.reason
+                            import logging
+                            logging.getLogger(__name__).warning(
+                                'Session %s: queued input %s refused (%s) and dropped', ref.session_id,
+                                head['request_id'], exc.reason)
+                            refusing = head['admission_id'], exc.reason
                             refused = await self._refuse_head(ref, *refusing)
                             refusing = None
                             if refused:
